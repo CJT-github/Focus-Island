@@ -1,0 +1,79 @@
+﻿Focus Island · Windows / macOS 工程包
+
+一、这份工程的状态
+Windows x64 已有本机验证过的便携版。
+macOS 平台适配源码与 GitHub Actions 流程已准备，目标为 macOS 11+：
+- Apple Silicon：arm64
+- Intel：x86_64
+本机是 Windows；本包不包含已经在 Mac 上构建和验收的 .app/.dmg。
+Windows 上的 Rust 纯类型检查不等于 macOS 链接、运行或实机验收。
+
+二、上传到你的 GitHub 仓库
+目标仓库：https://github.com/CJT-github/Focus-Island
+请使用 CJT-github 或有写入权限的账号。当前助理连接没有写入权限，未上传任何文件。
+
+解压工程包，进入能看到 Cargo.toml 的目录。代码应直接位于仓库根目录，
+不要多套一层 FocusIsland-source 文件夹。必须包含隐藏目录 .github：
+  .github/workflows/package.yml
+  Cargo.toml / Cargo.lock
+  src/ / ui/ / tools/
+
+使用 Git 推送（适用于当前空仓库）：
+  git init -b main
+  git add Cargo.toml Cargo.lock src ui tools .github .gitignore README.md PACKAGING.txt tray-icon.png
+  git commit -m "feat: add Windows and macOS packaging"
+  git remote add origin https://github.com/CJT-github/Focus-Island.git
+  git push -u origin main
+
+Git 会使用你已配置的身份和登录方式；若提示认证，在 GitHub 的浏览器授权中完成，
+不要把密码、令牌或本机 state.json 放入工程。若仓库已有提交，应先取回并合并，勿强制覆盖。
+也可在 GitHub 的 Upload files 页面上传同一组文件；务必保留 .github/workflows 的目录结构。
+
+三、触发构建并下载
+首次推送源码会自动触发 Build desktop packages；后续可在仓库 Actions 中选择该流程，
+通过 Run workflow 手动启动。
+流程包含 Windows x64、macOS arm64、macOS x86_64 三个任务，失败会保留日志。
+构建成功后，在该次运行页面的 Artifacts 区域下载：
+  FocusIsland-windows-x64
+  FocusIsland-macos-arm64
+  FocusIsland-macos-x86_64
+Windows 产物是便携 ZIP；Mac 产物包含 .app 的 ZIP、DMG 与 SHA256。
+产物保留 14 天，不会自动发布 GitHub Release。
+
+Mac 打包先执行 Rust 测试、编译、独立配置下的 GUI 自检；自检失败不会输出正式包。
+这些检查不能代替真实鼠标穿透、Retina/多屏、系统权限提示和桌面动画的实机验收。
+Mac CI 尚未在本次会话中运行；首次云端运行若有错误，应按日志修复后重新构建。
+
+四、本机打包
+Windows（需要 Rust MSVC、C++ Build Tools、Windows SDK）：
+  powershell -ExecutionPolicy Bypass -File .\tools\package-windows.ps1
+  powershell -ExecutionPolicy Bypass -File .\tools\package-windows.ps1 -SkipBuild
+
+Mac（需要对应架构 Mac、Xcode Command Line Tools、Rust、Python 3.11+）：
+  python3 tools/package-macos.py --target aarch64-apple-darwin
+或 Intel Mac：
+  python3 tools/package-macos.py --target x86_64-apple-darwin
+
+重新生成工程 ZIP（Windows）：
+  powershell -ExecutionPolicy Bypass -File .\tools\package-source.ps1
+
+五、平台差异
+Windows 使用 WebView2，目标电脑需要安装 Microsoft Edge WebView2 Runtime；
+Mac 使用系统 WKWebView，无需安装 Edge。
+Windows 配置目录：%APPDATA%\FocusIsland
+Mac 配置目录：~/Library/Application Support/FocusIsland
+
+Windows 自定义动作使用 PowerShell；Mac 使用 /bin/zsh，工作目录为用户主目录。
+两种命令类型分开保存，不自动把 PowerShell 改成 Shell 执行。
+Mac 可选择 Shell、睡眠、关机、重启；现代 macOS 锁屏动作暂不提供。
+Mac 系统动作可能触发“自动化”授权；取消、拒绝或系统限制会在任务状态中反馈。
+Mac 岛体位于可用屏幕区域顶部下方 20 点，避开菜单栏；设置浮窗位于右下角。
+
+Mac 包仅带 ad-hoc 本地签名，未使用 Developer ID、未经过 Apple 公证；
+首次打开可能需要在系统隐私与安全性设置中允许。工程不会关闭 Gatekeeper。
+正式向其他用户分发时，可另外配置 Developer ID 签名和公证。
+
+官方参考：
+https://docs.github.com/en/migrations/importing-source-code/using-the-command-line-to-import-source-code/adding-locally-hosted-code-to-github
+https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts
+https://developer.apple.com/macos/distribution/

@@ -1,0 +1,119 @@
+name: Build desktop packages
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**'
+      - 'ui/**'
+      - 'tools/package-windows.ps1'
+      - 'tools/package-macos.py'
+      - '.github/workflows/package.yml'
+
+# No pull_request / pull_request_target trigger and no release or repository writes.
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default stable
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Rust tests
+        shell: pwsh
+        run: |
+          cargo test --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package Windows
+        shell: pwsh
+        run: ./tools/package-windows.ps1
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: FocusIsland-windows-x64
+          path: |
+            dist/FocusIsland-*-windows-x64.zip
+            dist/FocusIsland-*-windows-x64.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            arch: arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up native Rust target
+        shell: bash
+        env:
+          RUST_TARGET: ${{ matrix.target }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add "$RUST_TARGET"
+          python3 --version
+      - name: Test, build, GUI self-test and package
+        shell: bash
+        env:
+          RUST_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          python3 tools/package-macos.py --target "$RUST_TARGET"
+      - name: Upload Mac packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: FocusIsland-macos-${{ matrix.arch }}
+          path: |
+            dist/FocusIsland-*-macos-${{ matrix.arch }}.zip
+            dist/FocusIsland-*-macos-${{ matrix.arch }}.zip.sha256
+            dist/FocusIsland-*-macos-${{ matrix.arch }}.dmg
+            dist/FocusIsland-*-macos-${{ matrix.arch }}.dmg.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: State verification limits
+        if: success()
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          Mac packages are ad-hoc signed and **not notarized**.
+          Rust tests and the isolated GUI self-test passed on this runner.
+          The app self-test has a 25-second limit and an external 40-second watchdog.
+          This does not certify manual pointer behavior, permission prompts, or real system actions.
+          Packages are workflow artifacts only; no GitHub Release is published.
+          SUMMARY

@@ -1,0 +1,11 @@
+/target/
+/dist/
+/tools/verify/
+/shot-*.png
+/.DS_Store
+**/__pycache__/
+*.pyc
+*.log
+.env
+.env.*
+/state.json

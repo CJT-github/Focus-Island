@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Focus Island</title>
+<style>/*__CSS__*/</style>
+</head>
+<body data-view="__VIEW__">
+
+<!-- ============================================================
+     灵动岛 · 独立悬浮小药丸
+     ============================================================ -->
+<div class="island" id="island" role="button" tabindex="0" aria-label="灵动岛，倒计时控制" aria-expanded="false" aria-controls="expanded">
+  <div class="island__surface" aria-hidden="true">
+    <div class="island__glass"></div>
+  </div>
+
+  <!-- 胶囊态：未点击时只展示时间 -->
+  <div class="island__compact" id="compact">
+    <svg class="mini-ring" viewBox="0 0 24 24" aria-hidden="true">
+      <circle class="mini-ring__track" cx="12" cy="12" r="9.5" />
+      <circle class="mini-ring__value" id="miniRing" cx="12" cy="12" r="9.5" />
+    </svg>
+    <span class="island__time" id="compactTime">25:00</span>
+    <span class="idle-eyes" id="idleEyes" aria-hidden="true">
+      <span class="idle-eyes__eye idle-eyes__eye--left"><span class="idle-eyes__lid"><span class="idle-eyes__pupil"></span></span></span>
+      <span class="idle-eyes__eye idle-eyes__eye--right"><span class="idle-eyes__lid"><span class="idle-eyes__pupil"></span></span></span>
+    </span>
+  </div>
+
+  <!-- 展开态（圆盘） -->
+  <div class="island__expanded" id="expanded">
+    <svg class="dial" viewBox="0 0 340 340" aria-hidden="true">
+      <circle class="dial__ring" cx="170" cy="170" r="146" />
+      <circle class="dial__track" cx="170" cy="170" r="108" />
+      <circle class="dial__progress" id="dialProgress" cx="170" cy="170" r="108" />
+
+      <g id="ticks"></g>
+      <g id="hourMarks"></g>
+
+      <g class="hands" id="hands">
+        <g class="hand hand--hour"   id="handHour"><rect x="167.5" y="94" width="5" height="76" rx="2.5" /></g>
+        <g class="hand hand--minute" id="handMinute"><rect x="168.5" y="68"  width="3" height="102" rx="1.5" /></g>
+        <g class="hand hand--second" id="handSecond">
+          <rect x="169.25" y="52" width="1.5" height="118" rx="0.75" />
+          <rect x="169.25" y="170" width="1.5" height="22" rx="0.75" />
+        </g>
+      </g>
+    </svg>
+
+    <div class="readout">
+      <div class="readout__card">
+        <div class="readout__task" id="readoutTask">深度工作</div>
+        <div class="readout__digits" id="readoutDigits">00:25:00</div>
+        <div class="readout__chip" id="readoutChip">准备开始</div>
+      </div>
+    </div>
+
+    <div class="action-status action-status--island" id="islandAction" role="status" aria-live="polite" hidden>
+      <div class="action-status__head"><span class="action-status__label"></span><span class="action-status__phase"></span></div>
+      <div class="action-status__message"></div>
+      <button class="action-status__cancel" id="btnCancelIslandAction" hidden>取消本次执行</button>
+    </div>
+
+    <div class="island__ctrls">
+      <button class="ctl ctl--primary" id="btnToggle" title="开始 / 暂停">
+        <svg viewBox="0 0 24 24" class="ico"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg>
+      </button>
+      <button class="ctl" id="btnReset" title="重置" aria-label="重置倒计时">
+        <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M4.5 12a7.5 7.5 0 1 0 2.4-5.5" /><path d="M4.2 5v4.2h4.2" />
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- 裂开时的碎片层与特效 -->
+  <div class="island__fx" id="fx" aria-hidden="true"></div>
+</div>
+
+<!-- ============================================================
+     设置面板（独立浮窗）
+     ============================================================ -->
+<div class="panel-wrap" id="panelWrap">
+  <div class="panel" id="panel">
+    <div class="panel__head" id="panelDragHandle">
+      <div class="panel__heading">
+        <button class="mini-btn task-back" id="btnTaskBack" aria-label="返回设置" hidden><svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m14 6-6 6 6 6"/></svg></button>
+        <span class="panel__title" id="panelTitle">设置</span>
+      </div>
+      <button class="mini-btn" id="btnClose" aria-label="关闭">
+        <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <div class="panel__pages">
+    <div class="panel__scroll panel-page is-active" id="settingsPage">
+      <section class="mgroup">
+        <div class="mgroup__title">时钟倒计时</div>
+        <div class="presets" id="presets">
+          <button class="preset" data-min="5">5 分</button>
+          <button class="preset" data-min="15">15 分</button>
+          <button class="preset is-active" data-min="25">25 分</button>
+          <button class="preset" data-min="45">45 分</button>
+          
+        </div>
+        <div class="custom">
+          <label class="field"><span>时</span><input type="number" id="inH" min="0" max="99" step="1" value="0" /></label>
+          <label class="field"><span>分</span><input type="number" id="inM" min="0" max="59" step="1" value="25" /></label>
+          <label class="field"><span>秒</span><input type="number" id="inS" min="0" max="59" step="1" value="0" /></label>
+          <button class="btn btn--gold btn--sm" id="btnApplyCustom">应用</button>
+        </div>
+        <p class="mgroup__note" id="durNote" role="status">当前时长 25 分钟</p>
+      </section>
+
+      <section class="mgroup">
+        <div class="mgroup__heading"><div class="mgroup__title">倒计时任务</div><button class="task-page-link" id="btnOpenTaskPage"><span aria-hidden="true">＋</span> 新增任务</button></div>
+        <ul class="tasks" id="taskList"></ul>
+      </section>
+
+
+
+      <section class="mgroup">
+        <div class="mgroup__title">显示与提醒</div>
+        <label class="switch"><input type="checkbox" id="swHands" checked /><span class="switch__ui"></span><span class="switch__text">显示真实时钟指针</span></label>
+        <label class="switch"><input type="checkbox" id="swSecond" checked /><span class="switch__ui"></span><span class="switch__text">显示秒针</span></label>
+        <label class="switch"><input type="checkbox" id="swIdleClock" checked /><span class="switch__ui"></span><span class="switch__text">待机时间</span></label>
+        <label class="switch"><input type="checkbox" id="swEyes" /><span class="switch__ui"></span><span class="switch__text">待机眼睛</span></label>
+        <label class="switch"><input type="checkbox" id="swSound" checked /><span class="switch__ui"></span><span class="switch__text">结束提示音</span></label>
+        <label class="switch"><input type="checkbox" id="swNotify" /><span class="switch__ui"></span><span class="switch__text">桌面通知</span></label>
+        <label class="switch"><input type="checkbox" id="swTop" checked /><span class="switch__ui"></span><span class="switch__text">灵动岛始终置顶</span></label>
+        <label class="switch"><input type="checkbox" id="swMotion" /><span class="switch__ui"></span><span class="switch__text">减弱动态效果</span></label>
+      </section>
+
+      <section class="mgroup">
+        <div class="mgroup__title">操作</div>
+        <div class="mgroup__acts">
+          <button class="btn btn--sm" id="btnStart">开始 / 暂停</button>
+          <button class="btn btn--sm" id="btnReset2">重置</button>
+          <button class="btn btn--sm btn--danger" id="btnClear">清空任务</button>
+        </div>
+      </section>
+    </div>
+    <section class="panel__scroll panel-page task-settings-page" id="taskSettingsPage" aria-hidden="true" inert>
+      <div class="task-settings-context"><p class="action-scope" id="actionScope"></p><p class="task-settings-duration" id="taskSettingsDuration"></p></div>
+      <section class="mgroup" id="completionActionSection">
+        <div class="mgroup__title">结束后执行</div>
+        <label class="switch"><input type="checkbox" id="actionEnabled" /><span class="switch__ui"></span><span class="switch__text">启用结束动作</span></label>
+        <div class="action-config__row">
+          <div class="action-field"><span id="actionKindLabel">执行类型</span><select id="actionKind" hidden aria-hidden="true" tabindex="-1"><option value="command">自定义 PowerShell 命令</option><option value="shell">macOS Shell 命令</option><option value="lock">锁屏</option><option value="sleep">睡眠</option><option value="shutdown">关机</option><option value="restart">重启</option></select><button class="action-kind-trigger" id="actionKindTrigger" role="combobox" aria-labelledby="actionKindLabel actionKindValue" aria-controls="actionKindMenu" aria-expanded="false" aria-haspopup="listbox"><span id="actionKindValue">自定义 PowerShell 命令</span><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m7 10 5 5 5-5"/></svg></button></div>
+          <label class="action-field"><span>延迟（秒）</span><input type="number" id="actionDelay" min="0" max="300" step="1" value="10" /></label>
+        </div>
+        <label class="action-field action-command" id="actionCommandField"><span>PowerShell 命令</span><textarea id="actionCommand" rows="3" maxlength="4096" spellcheck="false" placeholder="Start-Process notepad.exe"></textarea><small>工作目录为程序所在文件夹。</small></label>
+        <p class="mgroup__note">保存后将在下次计时生效；本次尚未执行的动作会取消。</p>
+        <button class="btn btn--gold btn--sm" id="btnSaveAction">保存配置</button>
+        <p class="mgroup__note action-config-note" id="actionConfigNote" role="status" aria-live="polite"></p>
+        <div class="action-status action-status--panel" id="panelAction" role="status" aria-live="polite" hidden>
+          <div class="action-status__head"><span class="action-status__label"></span><span class="action-status__phase"></span></div>
+          <div class="action-status__message"></div>
+          <button class="action-status__cancel" id="btnCancelPanelAction" hidden>取消本次执行</button>
+        </div>
+      </section>
+    </section>
+    <section class="panel__scroll panel-page task-create-page" id="taskCreatePage" aria-hidden="true" inert>
+      <p class="task-create-intro">设定任务名称和专注时长。</p>
+      <label class="task-create-field"><span>任务名称</span><input type="text" id="inTaskName" aria-label="任务名称" placeholder="例如：阅读一章书" maxlength="18" autocomplete="off" /></label>
+      <div class="task-create-duration">
+        <label class="task-create-field"><span>分钟</span><input type="number" id="inTaskMin" aria-label="任务分钟" min="0" max="5999" step="1" value="25" /></label>
+        <label class="task-create-field"><span>秒</span><input type="number" id="inTaskSec" aria-label="任务秒数" min="0" max="59" step="1" value="0" /></label>
+      </div>
+      <p class="task-create-hint">创建后选中此任务，准备好时再开始。</p>
+      <section class="task-create-action" aria-labelledby="createActionHeading">
+        <h2 class="mgroup__title" id="createActionHeading">结束后执行</h2>
+        <label class="switch"><input type="checkbox" id="createActionEnabled" /><span class="switch__ui"></span><span class="switch__text">启用结束动作</span></label>
+        <div class="action-config__row">
+          <div class="action-field">
+            <span id="createActionKindLabel">执行类型</span>
+            <select id="createActionKind" hidden aria-hidden="true" tabindex="-1">
+              <option value="command">自定义 PowerShell 命令</option><option value="shell">macOS Shell 命令</option><option value="lock">锁屏</option><option value="sleep">睡眠</option><option value="shutdown">关机</option><option value="restart">重启</option>
+            </select>
+            <button class="action-kind-trigger" id="createActionKindTrigger" role="combobox" aria-labelledby="createActionKindLabel createActionKindValue" aria-controls="actionKindMenu" aria-expanded="false" aria-haspopup="listbox"><span id="createActionKindValue">自定义 PowerShell 命令</span><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg></button>
+          </div>
+          <label class="action-field"><span>延迟（秒）</span><input type="number" id="createActionDelay" aria-label="新任务结束动作延迟秒数" min="0" max="300" step="1" value="10" /></label>
+        </div>
+        <label class="action-field action-command" id="createActionCommandField"><span>PowerShell 命令</span><textarea id="createActionCommand" aria-label="新任务 PowerShell 命令" rows="3" maxlength="4096" placeholder="Start-Process notepad.exe" spellcheck="false"></textarea><small>工作目录为程序所在文件夹。</small></label>
+        <p class="task-create-action__note">与任务一起保存，到时按此配置执行。</p>
+      </section>
+      <p class="mgroup__note task-create-note" id="taskNote" role="status" aria-live="polite"></p>
+      <div class="task-create-actions"><button class="btn" id="btnCancelTask">取消</button><button class="btn btn--gold" id="btnAddTask">创建任务</button></div>
+    </section>
+    </div>
+  </div>
+</div>
+
+<div class="action-kind-menu" id="actionKindMenu" role="listbox" aria-labelledby="actionKindLabel" hidden inert>
+<button class="action-kind-option" id="actionKindOption-command" role="option" tabindex="-1" data-action-kind="command" aria-selected="true"><svg class="action-kind-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 7 5 5-5 5M13 17h5"/></svg><span>自定义 PowerShell 命令</span><span class="action-kind-check" aria-hidden="true">✓</span></button>
+<button class="action-kind-option" id="actionKindOption-lock" role="option" tabindex="-1" data-action-kind="lock" aria-selected="false"><svg class="action-kind-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="10" width="12" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"/></svg><span>锁屏</span><span class="action-kind-check" aria-hidden="true">✓</span></button>
+<button class="action-kind-option" id="actionKindOption-sleep" role="option" tabindex="-1" data-action-kind="sleep" aria-selected="false"><svg class="action-kind-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 15.2A8.5 8.5 0 0 1 8.8 4 8.5 8.5 0 1 0 20 15.2Z"/></svg><span>睡眠</span><span class="action-kind-check" aria-hidden="true">✓</span></button>
+<button class="action-kind-option" id="actionKindOption-shutdown" role="option" tabindex="-1" data-action-kind="shutdown" aria-selected="false"><svg class="action-kind-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v9M6.3 6.3a8 8 0 1 0 11.4 0"/></svg><span>关机</span><span class="action-kind-check" aria-hidden="true">✓</span></button>
+<button class="action-kind-option" id="actionKindOption-restart" role="option" tabindex="-1" data-action-kind="restart" aria-selected="false"><svg class="action-kind-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6.6M20 4v7h-7"/></svg><span>重启</span><span class="action-kind-check" aria-hidden="true">✓</span></button>
+</div>
+
+<script>window.__GEO__ = /*__GEO__*/; window.__STATE__ = /*__STATE__*/;</script>
+<script>/*__JS__*/</script>
+</body>
+</html>
