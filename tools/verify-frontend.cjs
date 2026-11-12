@@ -29,6 +29,10 @@ async function run(options = {}) {
         document.querySelector('#compactTime').textContent===expected &&
         document.querySelector('#readoutDigits').textContent===expected;
     },null,{timeout:2000});
+    const expectIdleEyes = page => page.waitForFunction(()=>{
+      const island=document.querySelector('#island');
+      return island.classList.contains('is-clock') && island.classList.contains('is-idle-eyes') && document.querySelector('#readoutTask').hidden;
+    },null,{timeout:2000});
     const expectCountdown = (page,sec) => page.waitForFunction(sec=>{
       const pad=n=>String(n).padStart(2,'0'),h=Math.floor(sec/3600),m=Math.floor(sec%3600/60),s=sec%60;
       const full=pad(h)+':'+pad(m)+':'+pad(s),compact=h?h+':'+pad(m)+':'+pad(s):pad(m)+':'+pad(s);
@@ -53,9 +57,16 @@ async function run(options = {}) {
       geometry:__checkHandGeometry(),text:document.querySelector('#compactTime').textContent
     }));
     assert.equal(initial.ticks,60);assert.equal(initial.hours,12);
-    assert(initial.geometry.every(distance=>distance<1e-6));await expectCountdown(island,65);
-    assert.equal(await island.textContent('#readoutChip'),'准备开始');
-    checks.push('60 ticks, 12 labels, centered hand bases; the selected saved task takes priority at startup');
+    assert(initial.geometry.every(distance=>distance<1e-6));await expectClock(island);
+    assert.equal(await island.locator('#readoutTask').count(),1);
+    assert.equal(await island.locator('#readoutTask').evaluate(node=>node.hidden),true);
+    const initialTimer=await island.evaluate(()=>messages.filter(message=>message.type==='timerState').at(-1));
+    assert.equal(initialTimer.taskId,'a');assert.equal(initialTimer.totalMs,65000);assert.equal(initialTimer.started,false);
+    assert((await panel.locator('.task.is-active').textContent()).includes('验证任务'));
+    await island.evaluate(()=>__applyState({settings:{showIdleClock:false,showIdleEyes:true}},false));await expectIdleEyes(island);
+    await island.evaluate(()=>__applyState({settings:{showIdleClock:true,showIdleEyes:false}},false));await expectClock(island);
+    assert.equal(await island.locator('#readoutChip').isHidden(),true);
+    checks.push('60 ticks, 12 labels and centered hand bases; saved selected tasks retain their duration and identity while startup shows configured clock or eyes');
 
     await panel.click('#btnStart');await panel.click('#btnReset2');await panel.click('#btnClear');
     await panel.fill('#inH','1');await panel.fill('#inM','2');await panel.fill('#inS','3');await panel.click('#btnApplyCustom');
@@ -148,7 +159,7 @@ async function run(options = {}) {
     });
     const applyPosition=()=>positionIsland.evaluate(settings=>__applyState({settings},false),offsetUpdate.settings);
     const selectedIdle=await stableTimer();await applyPosition();
-    assert.deepEqual(await stableTimer(),selectedIdle);await expectCountdown(positionIsland,65);
+    assert.deepEqual(await stableTimer(),selectedIdle);await expectClock(positionIsland);
     await positionIsland.evaluate(()=>__fromRust('toggleTimer'));
     const runningPosition=await stableTimer();assert.equal(runningPosition.running,true);
     await applyPosition();assert.deepEqual(await stableTimer(),runningPosition,'moving a running island preserves run identity and deadline');
@@ -162,17 +173,137 @@ async function run(options = {}) {
     await positionPanel.close();await positionIsland.close();
     checks.push('top offset defaults to 20 px, validates 0–1000 integers, preserves both drafts and settings, fits the panel, and never resets task/free or running/paused timers');
 
+    const durationPanel=await browser.newPage({viewport:{width:340,height:620}});
+    durationPanel.on('pageerror',error=>errors.push(error.message));
+    await durationPanel.addInitScript(()=>{
+      window.messages=[];window.ipc={postMessage(value){messages.push(JSON.parse(value));}};
+    });
+    await durationPanel.goto('about:blank');await durationPanel.setContent(html('panel'));
+    const editTask=async id=>{
+      if(await durationPanel.locator('#taskSettingsPage').getAttribute('aria-hidden')==='false')await durationPanel.click('#btnTaskBack');
+      await durationPanel.locator('.task__edit[data-task-id="'+id+'"]').click();
+    };
+    await editTask('b');assert.equal(await durationPanel.inputValue('#editTaskMin'),'1');assert.equal(await durationPanel.inputValue('#editTaskSec'),'5');
+    await durationPanel.fill('#editTaskMin','2');await durationPanel.fill('#editTaskSec','7');
+    await durationPanel.fill('#actionCommand','independent action draft');
+    await durationPanel.evaluate(s=>__applyState({...s,settings:{...s.settings,sound:true}},false),state);
+    assert.equal(await durationPanel.inputValue('#editTaskMin'),'2');assert.equal(await durationPanel.inputValue('#editTaskSec'),'7');
+    await editTask('a');assert.equal(await durationPanel.inputValue('#editTaskMin'),'1');await editTask('b');
+    assert.equal(await durationPanel.inputValue('#editTaskSec'),'7');assert.equal(await durationPanel.inputValue('#actionCommand'),'independent action draft');
+    const countBeforeDuration=await durationPanel.evaluate(()=>messages.length);
+    for (const [minutes,seconds] of [['0','0'],['0.5','1'],['6000','0'],['1','60']]) {
+      await durationPanel.fill('#editTaskMin',minutes);await durationPanel.fill('#editTaskSec',seconds);await durationPanel.click('#btnSaveTaskDuration');
+      assert.equal(await durationPanel.evaluate(()=>messages.length),countBeforeDuration);assert(await durationPanel.textContent('#taskDurationNote'));
+    }
+    await durationPanel.fill('#editTaskMin','2');await durationPanel.fill('#editTaskSec','7');await durationPanel.press('#editTaskSec','Enter');
+    const durationRequest=await durationPanel.evaluate(()=>messages.at(-1));
+    assert.equal(durationRequest.type,'setTaskDuration');assert.equal(durationRequest.taskId,'b');assert.equal(durationRequest.sec,127);assert(Number.isSafeInteger(durationRequest.requestId));
+    assert.equal(await durationPanel.locator('#editTaskMin').isDisabled(),true);assert.equal(await durationPanel.locator('#editTaskSec').isDisabled(),true);
+    await durationPanel.locator('#btnSaveTaskDuration').evaluate(node=>node.click());assert.equal(await durationPanel.evaluate(()=>messages.length),countBeforeDuration+1);
+    await durationPanel.evaluate(request=>__taskDurationResult({ok:true,...request,requestId:request.requestId+1}),durationRequest);
+    assert.equal(await durationPanel.locator('#btnSaveTaskDuration').isDisabled(),true);
+    await durationPanel.evaluate(request=>__taskDurationResult({ok:false,...request,message:'模拟保存失败'}),durationRequest);
+    assert.equal(await durationPanel.locator('#btnSaveTaskDuration').isDisabled(),false);assert.equal(await durationPanel.inputValue('#editTaskSec'),'7');assert.equal(await durationPanel.textContent('#taskDurationNote'),'模拟保存失败');
+    await durationPanel.click('#btnSaveTaskDuration');const retryDuration=await durationPanel.evaluate(()=>messages.at(-1));assert.notEqual(retryDuration.requestId,durationRequest.requestId);
+    await editTask('a');await durationPanel.fill('#editTaskMin','3');await durationPanel.fill('#editTaskSec','9');
+    const changedTaskB={...state,tasks:state.tasks.map(task=>task.id==='b'?{...task,sec:127}:task)};
+    await durationPanel.evaluate(s=>__applyState(s,false),changedTaskB);
+    await durationPanel.evaluate(request=>__taskDurationResult({ok:true,...request,message:'已保存'}),retryDuration);
+    assert.equal(await durationPanel.inputValue('#editTaskMin'),'3');assert.equal(await durationPanel.inputValue('#editTaskSec'),'9');
+    assert.equal(await durationPanel.textContent('#actionScope'),'验证任务');assert.equal(await durationPanel.textContent('#taskDurationNote'),'尚未保存');
+    await editTask('b');assert.equal(await durationPanel.inputValue('#editTaskMin'),'2');assert.equal(await durationPanel.inputValue('#editTaskSec'),'7');assert.equal(await durationPanel.inputValue('#actionCommand'),'independent action draft');
+    await editTask('a');await durationPanel.fill('#editTaskMin','5999');await durationPanel.fill('#editTaskSec','59');await durationPanel.click('#btnSaveTaskDuration');
+    const maximumRequest=await durationPanel.evaluate(()=>messages.at(-1));assert.equal(maximumRequest.sec,359999);assert.equal(maximumRequest.taskId,'a');
+    await durationPanel.evaluate(s=>__applyState(s,true),{...changedTaskB,tasks:changedTaskB.tasks.map(task=>task.id==='a'?{...task,sec:359999}:task),duration_sec:359999});
+    assert.equal(await durationPanel.locator('#btnSaveTaskDuration').isDisabled(),true,'state alone cannot acknowledge an edit');
+    await durationPanel.evaluate(request=>__taskDurationResult({ok:true,...request}),maximumRequest);
+    assert.equal(await durationPanel.locator('#btnSaveTaskDuration').isDisabled(),false);
+    await durationPanel.locator('#btnSaveAction').scrollIntoViewIfNeeded();
+    const saveBounds=await durationPanel.locator('#btnSaveAction').boundingBox();assert(saveBounds.y>=0 && saveBounds.y+saveBounds.height<=620);
+    await editTask('b');await durationPanel.fill('#editTaskMin','0');await durationPanel.fill('#editTaskSec','1');await durationPanel.click('#btnSaveTaskDuration');
+    const removedRequest=await durationPanel.evaluate(()=>messages.at(-1));assert.equal(removedRequest.sec,1);
+    await durationPanel.evaluate(s=>__applyState({...s,tasks:s.tasks.filter(task=>task.id!=='b')},false),changedTaskB);
+    await durationPanel.evaluate(request=>__taskDurationResult({ok:true,...request}),removedRequest);
+    assert.equal(await durationPanel.locator('#settingsPage').getAttribute('aria-hidden'),'false');
+    assert((await durationPanel.evaluate(()=>messages)).every(message=>['pageReady','setTaskDuration'].includes(message.type)),'editing tasks must not select or reset the current timer');
+    await durationPanel.close();
+    checks.push('task duration editor isolates task/action drafts, validates seconds and limits, disables duplicate saves, matches scoped request IDs, preserves failures and ignores deleted-task callbacks');
+
+    const completionPage=await browser.newPage({viewport:{width:580,height:580}});
+    completionPage.on('pageerror',error=>errors.push(error.message));
+    await completionPage.clock.install({time:new Date('2030-01-01T12:00:00Z')});
+    await completionPage.clock.pauseAt(new Date('2030-01-01T12:00:01Z'));
+    await completionPage.addInitScript(()=>{
+      window.messages=[];window.ipc={postMessage(value){messages.push({...JSON.parse(value),at:Date.now()});}};
+    });
+    await completionPage.goto('about:blank');
+    await completionPage.setContent(html('island',{...state,duration_sec:1,settings:{...state.settings,showIdleClock:true,showIdleEyes:false}},
+      {dial:340,effect:580,pillW:132,pillH:38}));
+    assert.equal(await completionPage.locator('#readoutTask').count(),1);
+    assert.equal(await completionPage.locator('#readoutTask').evaluate(node=>node.hidden),true);
+    assert.equal(await completionPage.locator('#islandAction').count(),0);await expectClock(completionPage);
+    await completionPage.locator('#island').focus();
+    assert.equal(await completionPage.locator('#island').evaluate(node=>getComputedStyle(node).outlineStyle),'none');
+    const completionTimer=()=>completionPage.evaluate(()=>messages.filter(message=>message.type==='timerState').at(-1));
+    await completionPage.evaluate(()=>__fromRust('toggleTimer'));
+    assert.equal(await completionPage.textContent('#readoutTask'),'验证任务');assert.equal(await completionPage.locator('#readoutTask').evaluate(node=>node.hidden),false);
+    await completionPage.clock.runFor(1040);
+    const finished=await completionTimer();assert.equal(finished.done,true);assert.equal(finished.idleAfterCompletion,false);
+    assert.equal(await completionPage.textContent('#readoutTask'),'验证任务');assert.equal(await completionPage.locator('#readoutTask').evaluate(node=>node.hidden),false);
+    const finishAt=await completionPage.evaluate(()=>messages.find(message=>message.type==='timerDone').at);
+    const staleEffect=await completionPage.evaluate(()=>messages.filter(message=>message.type==='setEffect'&&message.active).at(-1).requestId);
+    const untilDeadline=finishAt+10000-await completionPage.evaluate(()=>Date.now());
+    await completionPage.clock.runFor(untilDeadline-1);assert.equal((await completionTimer()).idleAfterCompletion,false);
+    assert.equal(await completionPage.textContent('#readoutTask'),'验证任务');assert.equal(await completionPage.locator('#readoutTask').evaluate(node=>node.hidden),false);
+    await completionPage.clock.runFor(1);const completedDisplay=await completionTimer();
+    assert.equal(completedDisplay.idleAfterCompletion,true);assert.equal(completedDisplay.at-finishAt,10000);
+    for(const key of ['runId','taskId','done','started','remainingMs','totalMs'])assert.equal(completedDisplay[key],finished[key]);
+    assert.equal(await completionPage.locator('#island').evaluate(node=>node.classList.contains('is-open')||node.classList.contains('is-done')),false);
+    assert.equal(await completionPage.locator('#readoutChip').isHidden(),true);assert.equal(await completionPage.locator('#readoutTask').evaluate(node=>node.hidden),true);await expectClock(completionPage);
+    await completionPage.evaluate(id=>__viewportReady(id),staleEffect);await completionPage.clock.runFor(32);
+    assert.equal(await completionPage.locator('.crack__piece').count(),0);
+    await panel.evaluate(payload=>__applyTimer(payload),completedDisplay);
+    assert.equal(await panel.textContent('#btnStart'),'再来一次');assert.equal(await panel.locator('#island').evaluate(node=>node.classList.contains('is-clock')),true);
+    await completionPage.evaluate(()=>__applyState({settings:{showIdleClock:false,showIdleEyes:true}},false));
+    assert.equal(await completionPage.locator('#island').evaluate(node=>node.classList.contains('is-idle-eyes')),true);
+    await completionPage.evaluate(()=>__applyState({settings:{showIdleClock:false,showIdleEyes:false}},false));
+    assert.equal(await completionPage.textContent('#compactTime'),'');assert.equal(await completionPage.textContent('#readoutDigits'),'等待开始');
+    await completionPage.evaluate(()=>__applyState({settings:{showIdleClock:true,showIdleEyes:false}},false));await expectClock(completionPage);
+
+    // A real completion fragment exists before the user dismisses it. No reset
+    // or cancel-action message may be used to return the presentation to idle.
+    await completionPage.evaluate(()=>__fromRust('toggleTimer'));await completionPage.clock.runFor(1040);
+    await completionPage.evaluate(()=>__viewportReady(messages.filter(message=>message.type==='setEffect'&&message.active).at(-1).requestId));
+    await completionPage.clock.runFor(32);assert.equal(await completionPage.locator('.crack__piece').count(),2);
+    const clickedRun=await completionTimer();
+    await completionPage.locator('#island').evaluate(node=>node.click());
+    const clickedIdle=await completionTimer();assert.equal(clickedIdle.runId,clickedRun.runId);assert.equal(clickedIdle.idleAfterCompletion,true);
+    assert.equal(await completionPage.locator('.crack__piece').count(),0);await expectClock(completionPage);
+    assert.equal((await completionPage.evaluate(()=>messages)).filter(message=>['resetTimer','cancelCompletionAction'].includes(message.type)).length,0);
+    // Starting again invalidates the previous 10-second callback. Use a longer
+    // duration so the stale callback cannot be confused with a new completion.
+    await completionPage.evaluate(()=>__applyState({duration_sec:20},true));
+    await completionPage.evaluate(()=>__fromRust('toggleTimer'));const freshRun=await completionTimer();
+    await completionPage.clock.runFor(11000);const stillRunning=await completionTimer();
+    assert.equal(stillRunning.runId,freshRun.runId);assert.equal(stillRunning.running,true);assert.equal(stillRunning.idleAfterCompletion,false);assert(stillRunning.remainingMs>0);
+    await completionPage.evaluate(()=>__fromRust('resetTimer'));assert.equal((await completionTimer()).idleAfterCompletion,false);await expectClock(completionPage);
+    assert.equal((await completionTimer()).totalMs,20000);assert.equal(await completionPage.locator('#readoutTask').evaluate(node=>node.hidden),true);
+    await completionPage.close();
+    checks.push('dial shows the active task name through completion then hides it in idle; no action card or click outline; 10-second/click return preserves action-run facts and ignores stale ACKs/timeouts');
+
     await island.evaluate(()=>__fromRust('toggleTimer'));await island.waitForTimeout(450);
     await island.evaluate(s=>__applyState({...s,current_id:'b'},true),state);
     let timer = await island.evaluate(()=>messages.filter(m=>m.type==='timerState').at(-1));
-    assert.equal(timer.remainingMs,65000);assert.equal(timer.running,false);assert.equal(timer.started,false);
-    await expectCountdown(island,65);
+    assert.equal(timer.remainingMs,65000);assert.equal(timer.running,false);assert.equal(timer.started,false);assert.equal(timer.taskId,'b');
+    await expectClock(island);
     await island.evaluate(()=>__fromRust('toggleTimer'));
+    assert.equal(await island.textContent('#readoutTask'),'同秒任务');assert.equal(await island.locator('#readoutTask').evaluate(node=>node.hidden),false);
     await island.evaluate(()=>{const until=Date.now()+420;while(Date.now()<until){};});
     await island.waitForTimeout(100);
     await island.evaluate(()=>__fromRust('toggleTimer'));
     timer = await island.evaluate(()=>messages.filter(m=>m.type==='timerState').at(-1));
     assert(timer.remainingMs<64600,'a delayed event loop must subtract elapsed time');
+    assert.equal(await island.textContent('#readoutTask'),'同秒任务');assert.equal(await island.locator('#readoutTask').evaluate(node=>node.hidden),false);
     await island.evaluate(s=>__applyState({...s,settings:{...s.settings,showSecond:false}},false),state);
     assert.equal(await island.locator('#handSecond').evaluate(el=>getComputedStyle(el).display),'none');
     checks.push('same-duration task reset, wall-clock countdown, live preference application');
@@ -221,33 +352,34 @@ async function run(options = {}) {
     await clockPage.waitForFunction(()=>document.querySelector('#compactTime').textContent==='00:00:00');
     assert.equal(await clockPage.textContent('#readoutDigits'),'00:00:00');
     assert.equal(await clockPage.locator('#island').evaluate(node=>node.classList.contains('is-done')),false);
-    // Task priority also overrides eyes-only idle preferences.
+    // Selecting a saved task keeps idle preferences until the user starts it.
     const savedTasks={...emptyState,tasks:[{id:'new',name:'新任务',sec:65},{id:'other',name:'另一任务',sec:125}],current_id:'new',settings:{...emptyState.settings,showIdleClock:false,showIdleEyes:true}};
     await clockPage.evaluate(s=>__applyState(s,true),savedTasks);
-    await expectCountdown(clockPage,65);
-    assert.equal(await clockPage.textContent('#readoutChip'),'准备开始');
+    await expectIdleEyes(clockPage);
+    assert.equal(await clockPage.locator('#readoutChip').isHidden(),true);
     let configured=await clockPage.evaluate(()=>messages.filter(message=>message.type==='timerState').at(-1));
-    assert.equal(configured.totalMs,65000);assert.equal(configured.started,false);
+    assert.equal(configured.totalMs,65000);assert.equal(configured.started,false);assert.equal(configured.taskId,'new');
     await clockPage.evaluate(s=>__applyState({...s,current_id:'other',duration_sec:125},true),savedTasks);
-    await expectCountdown(clockPage,125);
+    await expectIdleEyes(clockPage);
     configured=await clockPage.evaluate(()=>messages.filter(message=>message.type==='timerState').at(-1));
-    assert.equal(configured.totalMs,125000);assert.equal(configured.remainingMs,125000);assert.equal(configured.started,false);
+    assert.equal(configured.totalMs,125000);assert.equal(configured.remainingMs,125000);assert.equal(configured.started,false);assert.equal(configured.taskId,'other');
     await clockPage.evaluate(()=>__fromRust('toggleTimer'));
     assert.equal(await clockPage.locator('#island').evaluate(node=>node.classList.contains('is-clock')),false);
     assert.equal(await clockPage.textContent('#readoutDigits'),'00:02:05');
-    assert.equal(await clockPage.textContent('#readoutTask'),'另一任务');
+    assert.equal(await clockPage.textContent('#readoutTask'),'另一任务');assert.equal(await clockPage.locator('#readoutTask').evaluate(node=>node.hidden),false);
     await clockPage.evaluate(()=>__fromRust('toggleTimer'));
     await clockPage.waitForTimeout(150);
     assert.equal(await clockPage.textContent('#readoutDigits'),'00:02:05');
-    assert.equal(await clockPage.textContent('#readoutChip'),'已暂停');
+    assert.equal(await clockPage.textContent('#readoutTask'),'另一任务');assert.equal(await clockPage.locator('#readoutTask').evaluate(node=>node.hidden),false);
+    assert.equal(await clockPage.locator('#readoutChip').isHidden(),true);
     await clockPage.evaluate(()=>__fromRust('resetTimer'));
-    await expectCountdown(clockPage,125);
-    assert.equal(await clockPage.textContent('#readoutChip'),'准备开始');
+    await expectIdleEyes(clockPage);
+    assert.equal(await clockPage.locator('#readoutChip').isHidden(),true);
     await clockPage.evaluate(s=>__applyState(s,true),emptyState);
     await expectLocalClock();
     assert.equal((await clockPage.evaluate(()=>messages)).filter(message=>message.type==='frontendError').length,0);
     await clockPage.close();
-    checks.push('task-free clock updates with hidden hands and across midnight; adding/selecting/resetting a task shows its countdown even with eyes-only preferences; paused free timers stay countdown and clearing tasks restores clock');
+    checks.push('live idle clock updates with hidden hands and across midnight; saved/selected/reset tasks keep configured idle, starting uses selected duration/name, paused task/free timers remain countdown');
 
 
     // Reset a collapsed timer after completion was requested, before native ACK.
@@ -273,10 +405,10 @@ async function run(options = {}) {
     assert.equal(await resetRacePage.locator('#island').evaluate(node=>node.classList.contains('is-open')),false);
     await resetRacePage.evaluate(id=>__viewportReady(id),pendingRestore);
     await resetRacePage.waitForFunction(()=>document.querySelector('#island').classList.contains('is-open'));
-    await expectCountdown(resetRacePage,1);
+    await expectClock(resetRacePage);assert.equal(await resetRacePage.locator('#readoutTask').evaluate(node=>node.hidden),true);
     const resetConfiguration=await resetRacePage.evaluate(()=>messages.filter(message=>message.type==='timerState').at(-1));
     assert.equal(resetConfiguration.totalMs,1000);assert.equal(resetConfiguration.started,false);
-    assert.equal(await resetRacePage.textContent('#readoutChip'),'准备开始');
+    assert.equal(await resetRacePage.locator('#readoutChip').isHidden(),true);
     await resetRacePage.locator('#island').click({position:{x:170,y:20}});
     await resetRacePage.waitForFunction(()=>messages.some(message=>message.type==='setShape' && !message.open));
     await resetRacePage.evaluate(()=>__viewportReady(messages.filter(message=>message.type==='setShape' && !message.open).at(-1).requestId));

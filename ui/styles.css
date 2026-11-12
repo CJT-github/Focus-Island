@@ -57,8 +57,7 @@ body[data-view]{background:transparent}
   outline:none;
   /* Keep the canvas fixed: only the glass silhouette changes during morphing. */
 }
-.island:focus-visible > .island__compact{outline:2px solid rgba(232,194,104,.55);outline-offset:-2px;border-radius:19px}
-.island.is-open:focus-visible > .island__expanded{outline:2px solid rgba(232,194,104,.55);outline-offset:-2px;border-radius:50%}
+.island:focus{outline:none}
 
 /* Filter the clipped glass only; text and clock hands remain sharp. */
 .island__surface{
@@ -232,14 +231,17 @@ body[data-view]{background:transparent}
   box-shadow:inset 0 1px 1px rgba(192,216,240,.15),inset 0 -1px 2px rgba(0,0,0,.65),0 3px 5px rgba(0,0,0,.3),0 10px 22px rgba(0,0,0,.36);
 }
 .readout__task{
-  font-size:11.5px;color:var(--text-2);letter-spacing:.06em;
-  max-width:190px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  max-width:190px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:11.5px;line-height:1.4;color:var(--text-2);letter-spacing:.04em;text-align:center;
 }
+.readout__task[hidden]{display:none}
+
 .readout__digits{
   font-family:var(--mono);font-size:34px;font-weight:500;
   font-variant-numeric:tabular-nums;letter-spacing:-.01em;
   color:var(--text);line-height:1.1;text-shadow:0 1px 3px rgba(0,0,0,.55);
 }
+.readout__chip[hidden]{display:none}
 .readout__chip{
   font-size:10.5px;color:var(--gold);
   background:linear-gradient(160deg,rgba(232,194,104,.18),rgba(232,194,104,.07));border:1px solid rgba(232,194,104,.16);
@@ -520,10 +522,6 @@ button:disabled{cursor:default;opacity:.4}
 .action-status__cancel:disabled{opacity:.5;cursor:default}
 .action-status[data-phase="error"] .action-status__phase{color:#f49a8e}
 .action-status[data-phase="success"] .action-status__phase{color:var(--green)}
-.action-status--island{position:absolute;left:50%;top:52px;transform:translateX(-50%);width:210px;z-index:5;padding:6px 9px;pointer-events:auto}
-.action-status--island .action-status__message{white-space:nowrap;text-overflow:ellipsis;overflow:hidden;max-height:15px}
-.action-status--island[data-phase="armed"] .action-status__message,
-.action-status--island[data-phase="pending"] .action-status__message{display:none}
 .action-status--panel{margin-top:10px}
 .action-scope{margin:0 0 4px;font-size:11.5px;color:var(--text);overflow-wrap:anywhere}
 .action-config__row{display:grid;grid-template-columns:minmax(0,1fr) 82px;gap:8px;margin:5px 0 9px}
@@ -632,3 +630,8 @@ button:disabled{cursor:default;opacity:.4}
 .task-settings-duration{font-size:11.5px;line-height:1.6;color:var(--text-3);margin-top:5px}
 .task-settings-page #completionActionSection{padding-top:18px;border-bottom:0}
 .task-settings-page #btnSaveAction{margin-top:14px}
+.task-duration-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,.65fr) auto;align-items:end;gap:8px}
+.task-duration-fields .btn{height:32px;white-space:nowrap;padding-inline:9px}
+.task-duration-fields input{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.task-duration-editor .mgroup__note{line-height:1.5}
+.task-duration-fields input:disabled{opacity:.5}

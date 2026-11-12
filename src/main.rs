@@ -31,6 +31,15 @@ struct TaskCreateRequest {
 }
 
 #[derive(Debug, Clone)]
+struct TaskDurationRequest {
+    // Keep malformed correlation values intact so every recognized request gets
+    // a matching failure response instead of disappearing during IPC parsing.
+    task_id: serde_json::Value,
+    sec: Option<u64>,
+    request_id: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
 enum Command {
     SetShape(bool, u64),
     SetEffect(bool, u64),
@@ -38,6 +47,7 @@ enum Command {
     ToggleTimer,
     ResetTimer,
     AddTask(TaskCreateRequest),
+    SetTaskDuration(TaskDurationRequest),
     RemoveTask(String),
     SelectTask(String),
     ClearTasks,
@@ -73,6 +83,11 @@ fn parse_command(raw: &str) -> Option<Command> {
             sec: v.get("sec").and_then(serde_json::Value::as_u64),
             completion_action: v.get("completionAction").cloned(),
             request_id,
+        }),
+        "setTaskDuration" => Command::SetTaskDuration(TaskDurationRequest {
+            task_id: v.get("taskId").cloned().unwrap_or(serde_json::Value::Null),
+            sec: v.get("sec").and_then(serde_json::Value::as_u64),
+            request_id: v.get("requestId").cloned().unwrap_or(serde_json::Value::Null),
         }),
         "removeTask" => Command::RemoveTask(v.get("id")?.as_str()?.into()),
         "selectTask" => Command::SelectTask(v.get("id")?.as_str()?.into()),
@@ -126,6 +141,37 @@ fn created_task_state(state: &AppState, request: &TaskCreateRequest, path: &std:
     updated.tasks.push(task);
     updated.save_to_path(path).map_err(|error| format!("创建任务失败：{}", error))?;
     Ok((updated, task_id))
+}
+
+/// Commit a task-duration edit before mutating live state or cancelling actions.
+/// The result controls whether the island must reset/pause its current timer.
+fn apply_task_duration(state: &mut AppState, actions: &mut ActionController,
+    request: &TaskDurationRequest, path: &std::path::Path) -> Result<bool, String> {
+    let task_id = request.task_id.as_str().filter(|id| !id.is_empty())
+        .ok_or("请选择需要修改时长的任务")?;
+    let sec = request.sec.filter(|sec| (1..=state::MAX_DURATION_SEC).contains(sec))
+        .ok_or("任务时长须为 1 秒至 99:59:59 的整数秒")?;
+    let index = state.tasks.iter().position(|task| task.id == task_id)
+        .ok_or("任务不存在，请重新选择")?;
+    let duration_changed = state.tasks[index].sec != sec;
+    let reset_timer = duration_changed && state.current_id == task_id;
+    let mut updated = state.clone();
+    updated.tasks[index].sec = sec;
+    if reset_timer { updated.duration_sec = sec; }
+    updated.save_to_path(path).map_err(|error| format!("保存任务时长失败：{}", error))?;
+    *state = updated;
+    if reset_timer { actions.invalidate("任务时长已修改，本次动作已取消"); }
+    Ok(reset_timer)
+}
+
+fn task_duration_result(request: &TaskDurationRequest, result: &Result<bool, String>) -> serde_json::Value {
+    let (ok, message) = match result {
+        Ok(true) => (true, "任务时长已保存，当前计时已重置"),
+        Ok(false) => (true, "任务时长已保存"),
+        Err(message) => (false, message.as_str()),
+    };
+    serde_json::json!({"ok":ok, "message":message,
+        "taskId":request.task_id, "requestId":request.request_id})
 }
 
 fn updated_action_state(state: &AppState, task_id: &str, value: serde_json::Value) -> Result<AppState, String> {
@@ -529,6 +575,16 @@ fn main() {
                     push_callback(&panel_webview, "__taskCreateResult", &payload);
                     log(if ok { "任务创建成功" } else { "任务创建失败" });
                 }
+                Command::SetTaskDuration(request) => {
+                    let result = apply_task_duration(&mut app_state, &mut completion_actions, &request, &path);
+                    if let Ok(reset_timer) = &result {
+                        sync_state(&app_state, &island_webview, &panel_webview, *reset_timer);
+                    }
+                    let payload = task_duration_result(&request, &result);
+                    push_callback(&island_webview, "__taskDurationResult", &payload);
+                    push_callback(&panel_webview, "__taskDurationResult", &payload);
+                    log(if result.is_ok() { "任务时长已保存" } else { "任务时长保存失败" });
+                }
                 Command::RemoveTask(id) => {
                     reset = app_state.current_id == id;
                     app_state.tasks.retain(|task| task.id != id);
@@ -755,6 +811,185 @@ mod tests {
             Command::AddTask(request) => request,
             _ => panic!("expected task creation"),
         }
+    }
+
+    fn duration_request(value: serde_json::Value) -> TaskDurationRequest {
+        match parse_command(&value.to_string()).expect("setTaskDuration must reach validation") {
+            Command::SetTaskDuration(request) => request,
+            _ => panic!("expected task duration update"),
+        }
+    }
+
+    fn task_duration_pending_action() -> (AppState, ActionController) {
+        let mut state = AppState::default();
+        state.tasks[0].completion_action = CompletionAction {
+            enabled: true, kind: state::ActionKind::Lock, delay_sec: 300,
+            ..CompletionAction::default()
+        };
+        let mut actions = ActionController::default();
+        let mut update = TimerUpdate {
+            run_id: "duration-test-run".into(), task_id: "t1".into(),
+            started: true, running: true, remaining_ms: 1000.0, total_ms: 1500_000.0,
+            ..TimerUpdate::default()
+        };
+        actions.observe(&update, &state);
+        update.running = false;
+        update.done = true;
+        update.remaining_ms = 0.0;
+        actions.observe(&update, &state);
+        assert!(actions.complete(&TimerCompletion {
+            run_id: update.run_id, task_id: update.task_id, task: "test".into(),
+        }, Instant::now()));
+        assert_eq!(actions.status().phase, actions::Phase::Pending);
+        (state, actions)
+    }
+
+    #[test]
+    fn task_duration_selected_boundaries_persist_then_reset_and_cancel_current_action() {
+        for sec in [1, state::MAX_DURATION_SEC] {
+            let file = TaskCreateTestFile::new();
+            let (mut state, mut actions) = task_duration_pending_action();
+            let request = duration_request(serde_json::json!({
+                "type":"setTaskDuration", "taskId":"t1", "sec":sec, "requestId":17,
+            }));
+            assert!(apply_task_duration(&mut state, &mut actions, &request, &file.0).unwrap());
+            assert_eq!(state.current_id, "t1");
+            assert_eq!(state.tasks[0].sec, sec);
+            assert_eq!(state.duration_sec, sec);
+            assert_eq!(actions.status().phase, actions::Phase::Cancelled);
+            assert_eq!(serde_json::to_value(AppState::load(&file.0)).unwrap(),
+                serde_json::to_value(&state).unwrap());
+            assert!(actions.poll(Instant::now() + Duration::from_secs(600)).is_none());
+        }
+    }
+
+    #[test]
+    fn task_duration_noncurrent_edit_preserves_selection_timer_and_pending_action() {
+        let file = TaskCreateTestFile::new();
+        let (mut state, mut actions) = task_duration_pending_action();
+        // Custom timer duration can differ from its selected task's saved duration.
+        state.duration_sec = 71;
+        let mut expected = state.clone();
+        expected.tasks[1].sec = 61;
+        let action_before = actions.status().clone();
+        let request = duration_request(serde_json::json!({
+            "type":"setTaskDuration", "taskId":"t2", "sec":61, "requestId":"edit-second",
+        }));
+        assert!(!apply_task_duration(&mut state, &mut actions, &request, &file.0).unwrap());
+        assert_eq!(serde_json::to_value(&state).unwrap(), serde_json::to_value(&expected).unwrap());
+        assert_eq!(actions.status(), &action_before);
+        assert_eq!(serde_json::to_value(AppState::load(&file.0)).unwrap(),
+            serde_json::to_value(expected).unwrap());
+    }
+
+    #[test]
+    fn task_duration_same_value_preserves_custom_timer_and_pending_action() {
+        let file = TaskCreateTestFile::new();
+        let (mut state, mut actions) = task_duration_pending_action();
+        state.duration_sec = 71;
+        let before = serde_json::to_value(&state).unwrap();
+        let action_before = actions.status().clone();
+        let request = duration_request(serde_json::json!({
+            "type":"setTaskDuration", "taskId":"t1", "sec":state.tasks[0].sec, "requestId":18,
+        }));
+        assert!(!apply_task_duration(&mut state, &mut actions, &request, &file.0).unwrap());
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
+        assert_eq!(actions.status(), &action_before);
+        assert_eq!(serde_json::to_value(AppState::load(&file.0)).unwrap(), before);
+    }
+
+    #[test]
+    fn task_duration_invalid_fields_return_correlated_errors_without_mutation() {
+        let file = TaskCreateTestFile::new();
+        let (mut state, mut actions) = task_duration_pending_action();
+        state.save_to_path(&file.0).unwrap();
+        let before = serde_json::to_value(&state).unwrap();
+        let disk_before = std::fs::read(&file.0).unwrap();
+        let action_before = actions.status().clone();
+        let base = serde_json::json!({
+            "type":"setTaskDuration", "taskId":"t1", "sec":61, "requestId":"duration-error-19",
+        });
+        for (field, value) in [
+            ("sec", serde_json::json!(0)),
+            ("sec", serde_json::json!(state::MAX_DURATION_SEC + 1)),
+            ("sec", serde_json::json!(u64::MAX)),
+            ("sec", serde_json::json!(-1)),
+            ("sec", serde_json::json!(1.5)),
+            ("sec", serde_json::json!(1.0)),
+            ("sec", serde_json::json!("61")),
+            ("sec", serde_json::json!(true)),
+            ("sec", serde_json::Value::Null),
+            ("taskId", serde_json::json!("")),
+            ("taskId", serde_json::json!("missing")),
+            ("taskId", serde_json::json!(7)),
+            ("taskId", serde_json::Value::Null),
+        ] {
+            let mut value_request = base.clone();
+            value_request[field] = value;
+            let request = duration_request(value_request.clone());
+            let result = apply_task_duration(&mut state, &mut actions, &request, &file.0);
+            assert!(result.is_err(), "{value_request}");
+            let reply = task_duration_result(&request, &result);
+            assert_eq!(reply["ok"], false);
+            assert!(!reply["message"].as_str().unwrap().is_empty());
+            assert_eq!(reply["taskId"], value_request["taskId"]);
+            assert_eq!(reply["requestId"], value_request["requestId"]);
+            assert_eq!(serde_json::to_value(&state).unwrap(), before);
+            assert_eq!(std::fs::read(&file.0).unwrap(), disk_before);
+            assert_eq!(actions.status(), &action_before);
+        }
+        for field in ["taskId", "sec"] {
+            let mut value_request = base.clone();
+            value_request.as_object_mut().unwrap().remove(field);
+            let request = duration_request(value_request.clone());
+            let result = apply_task_duration(&mut state, &mut actions, &request, &file.0);
+            assert!(result.is_err());
+            let reply = task_duration_result(&request, &result);
+            assert_eq!(reply["taskId"], value_request["taskId"]);
+            assert_eq!(reply["requestId"], value_request["requestId"]);
+            assert_eq!(serde_json::to_value(&state).unwrap(), before);
+            assert_eq!(std::fs::read(&file.0).unwrap(), disk_before);
+            assert_eq!(actions.status(), &action_before);
+        }
+    }
+
+    #[test]
+    fn task_duration_save_failure_keeps_live_state_action_and_original_file() {
+        let file = TaskCreateTestFile::new();
+        let (mut state, mut actions) = task_duration_pending_action();
+        state.save_to_path(&file.0).unwrap();
+        let before = serde_json::to_value(&state).unwrap();
+        let disk_before = std::fs::read(&file.0).unwrap();
+        let action_before = actions.status().clone();
+        for task_id in ["t1", "t2"] {
+            let request = duration_request(serde_json::json!({
+                "type":"setTaskDuration", "taskId":task_id, "sec":3, "requestId":20,
+            }));
+            let result = apply_task_duration(&mut state, &mut actions, &request, &file.0.join("blocked.json"));
+            assert!(result.is_err());
+            assert_eq!(task_duration_result(&request, &result)["ok"], false);
+            assert_eq!(serde_json::to_value(&state).unwrap(), before);
+            assert_eq!(std::fs::read(&file.0).unwrap(), disk_before);
+            assert_eq!(actions.status(), &action_before);
+        }
+    }
+
+    #[test]
+    fn task_duration_success_response_preserves_correlation_values() {
+        let file = TaskCreateTestFile::new();
+        let (mut state, mut actions) = task_duration_pending_action();
+        let request = duration_request(serde_json::json!({
+            "type":"setTaskDuration", "taskId":"t2", "sec":9, "requestId":{"client":"panel","sequence":21},
+        }));
+        let result = apply_task_duration(&mut state, &mut actions, &request, &file.0);
+        assert!(result.is_ok());
+        let reply = task_duration_result(&request, &result);
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["taskId"], request.task_id);
+        assert_eq!(reply["requestId"], request.request_id);
+        let missing_id = duration_request(serde_json::json!({"type":"setTaskDuration"}));
+        assert_eq!(task_duration_result(&missing_id, &Err("invalid request".into()))["requestId"],
+            serde_json::Value::Null);
     }
 
     #[test]

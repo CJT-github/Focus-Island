@@ -29,6 +29,8 @@ async function connect(){
     await delay(100);
   }
   assert(island && panel,'Both native WebViews loaded');
+  await panel.waitForFunction(()=>typeof window.__applyTimer==='function');
+  await panel.evaluate(()=>{window.timerEvents=[];const applyTimer=window.__applyTimer;window.__applyTimer=value=>{timerEvents.push({...value,at:Date.now()});applyTimer(value);};});
   for(const page of [island,panel]){
     page.on('pageerror',e=>errors.push(e.message));
     page.on('console',msg=>{if(msg.type()==='error')errors.push(msg.text());});
@@ -74,10 +76,33 @@ async function expectClock(){
     document.querySelector('#readoutDigits').textContent===expected;
  },null,{timeout:2000});
 }
-async function expectCountdown(sec){
- const pad=n=>String(n).padStart(2,'0');
- await digits(pad(Math.floor(sec/3600))+':'+pad(Math.floor(sec%3600/60))+':'+pad(sec%60));
- assert.equal(await island.locator('#island').evaluate(node=>node.classList.contains('is-clock')||node.classList.contains('is-idle-eyes')),false);
+async function expectPrepared(sec){
+ await expectDuration(sec);await expectClock();await expectQuietChip();
+ assert.equal(await island.locator('#readoutTask').evaluate(node=>node.hidden),true);
+}
+async function expectClockPhase(){
+ await expectClock();await island.waitForFunction(()=>!document.querySelector('#island').classList.contains('is-idle-eyes')&&Number(getComputedStyle(document.querySelector('#compactTime')).opacity)>.95&&Number(getComputedStyle(document.querySelector('#idleEyes')).opacity)<.05,null,{timeout:2000});
+}
+async function expectEyes(timeout=12500){
+ await island.waitForFunction(()=>{
+  const island=document.querySelector('#island'),eyes=document.querySelector('#idleEyes'),compact=document.querySelector('.island__compact'),box=eyes.getBoundingClientRect();
+  const pupils=[...eyes.querySelectorAll('.idle-eyes__pupil')];
+  return island.classList.contains('is-idle-eyes')&&!window.__isOpen()&&Number(getComputedStyle(eyes).opacity)>.95&&Number(getComputedStyle(compact).opacity)>.95&&Number(getComputedStyle(document.querySelector('#compactTime')).opacity)<.05&&box.width>100&&box.height>30&&pupils.length===2&&[...eyes.querySelectorAll('.idle-eyes__lid')].every(lid=>lid.getBoundingClientRect().height>3)&&pupils.every(p=>{const bounds=p.getBoundingClientRect();return bounds.width>1&&bounds.height>1&&getComputedStyle(p).visibility==='visible';});
+ },null,{timeout});
+ assert.equal(await island.locator('#readoutTask').evaluate(node=>node.hidden),true);
+}
+async function expectTaskName(name){
+ await island.waitForFunction(name=>{const task=document.querySelector('#readoutTask');return !task.hidden&&task.textContent===name&&!document.querySelector('#island').classList.contains('is-idle-eyes');},name,{timeout:2000});
+}
+async function expectQuietChip(){assert.equal(await island.locator('#readoutChip').evaluate(node=>node.hidden&&node.textContent===''),true);}
+async function expectCompletedIdle(run,mode='clock'){
+ await panel.waitForFunction(id=>timerEvents.at(-1)?.runId===id&&timerEvents.at(-1)?.idleAfterCompletion===true,run.runId,{timeout:13000});
+ const idle=await panel.evaluate(()=>timerEvents.at(-1));
+ for(const key of ['runId','taskId','done','started','running','remainingMs'])assert.equal(idle[key],run[key],key+' survives returning to idle');
+ await expectQuietChip();await island.waitForFunction(()=>!window.__isOpen(),null,{timeout:3000});
+ if(mode==='eyes')await expectEyes(2000);else await expectClockPhase();
+ assert.equal(await island.locator('#readoutTask').evaluate(node=>node.hidden),true);
+ assert.equal(await island.locator('#island').evaluate(node=>node.classList.contains('is-idle')&&!node.classList.contains('is-done')),true);
 }
 async function expectDuration(sec){
  for(let n=0;n<80;n++){
@@ -89,15 +114,23 @@ async function expectDuration(sec){
 async function custom(sec){
  await panel.locator('#inH').fill('0');await panel.locator('#inM').fill('0');await panel.locator('#inS').fill(String(sec));
  await panel.locator('#btnApplyCustom').click();
- await expectDuration(sec);await expectCountdown(sec);
+ await expectDuration(sec);await expectPrepared(sec);
 }
 (async()=>{
  try{
-  fs.writeFileSync(path.join(data,'state.json'),JSON.stringify({tasks:[{id:'initial',name:'测试初始任务',sec:1500}],current_id:'initial',duration_sec:25*60,settings:{showHands:true,showSecond:true,sound:false,notify:false,alwaysOnTop:true,reduceMotion:false}}));
-  await launch();
+  fs.writeFileSync(path.join(data,'state.json'),JSON.stringify({tasks:[{id:'initial',name:'测试初始任务',sec:1500}],current_id:'initial',duration_sec:25*60,settings:{showHands:true,showSecond:true,showIdleEyes:true,showIdleClock:true,sound:false,notify:false,alwaysOnTop:true,reduceMotion:false}}));
+  await launch();report.prefersReducedMotion=await island.evaluate(()=>matchMedia('(prefers-reduced-motion: reduce)').matches);assert.equal(report.prefersReducedMotion,false,'The actual system prefers reduced motion, so eyes are intentionally disabled; no preference emulation was applied');
   const initial=await island.evaluate(()=>({width:innerWidth,height:innerHeight,time:document.querySelector('#compactTime').textContent}));
-  assert.equal(initial.width,580);assert.equal(initial.height,580);await expectCountdown(1500);await expectDuration(1500);
-  pass('Stable native canvas with the selected saved task countdown',initial);
+  assert.equal(initial.width,580);assert.equal(initial.height,580);await expectPrepared(1500);await expectDuration(1500);
+  assert.equal(await island.locator('#readoutTask').count(),1);assert.equal(await island.locator('#islandAction,#btnCancelIslandAction').count(),0);await expectQuietChip();await expectClockPhase();
+  await expectEyes();report.startupEyesPageElapsedMs=await island.evaluate(()=>performance.now());assert(report.startupEyesPageElapsedMs>=9500,'Saved selected tasks begin with a ten-second clock slot before the eye slot');
+  await island.screenshot({path:path.join(out,'native-startup-eyes.png'),omitBackground:true});
+  desktopShot('native-startup-eyes-desktop.png',probe().windows.find(w=>w.title==='Focus Island'));
+  pass('Saved selected task starts idle with clock first, then actual visible eyes after about ten seconds',initial);
+  await island.evaluate(()=>{window.__selftestOpen();window.__fromRust('toggleTimer');});await island.waitForFunction(()=>window.__isOpen());await expectTaskName('测试初始任务');
+  await island.evaluate(()=>window.__fromRust('toggleTimer'));await expectTaskName('测试初始任务');
+  await island.evaluate(()=>window.__fromRust('resetTimer'));await expectPrepared(1500);await island.locator('#island').evaluate(node=>node.click());await island.waitForFunction(()=>!window.__isOpen());
+  pass('Starting and pausing reveal the saved task name and stop idle eyes; resetting restores idle without changing its duration');
   await island.evaluate(async()=>{
     for(let n=0;n<6;n++){
       document.querySelector('#island').click();
@@ -153,15 +186,15 @@ async function custom(sec){
   await panel.screenshot({path:path.join(out,'native-panel.png'),omitBackground:true});
   await custom(8);await panel.locator('#btnStart').click();await delay(1150);
   assert(await island.locator('#island').evaluate(e=>e.classList.contains('is-running')));
-  assert.equal(await panel.locator('#btnStart').textContent(),'暂停');
+  assert.equal(await panel.locator('#btnStart').textContent(),'暂停');await expectQuietChip();await expectTaskName('测试初始任务');
   await panel.locator('label:has(#swSecond)').click();
   assert(await island.locator('#island').evaluate(e=>e.classList.contains('is-running')));
   await panel.locator('#btnStart').click();await delay(200);
   const paused=await island.locator('#readoutDigits').textContent();await delay(1200);
   assert.equal(await island.locator('#readoutDigits').textContent(),paused);
-  assert.equal(await island.locator('#island').evaluate(e=>e.classList.contains('is-clock')),false);
+  assert.equal(await island.locator('#island').evaluate(e=>e.classList.contains('is-clock')),false);await expectQuietChip();await expectTaskName('测试初始任务');
   pass('Panel start/pause controls island; paused timer remains countdown and preferences preserve it',paused);
-  await panel.locator('#btnReset2').click();await expectCountdown(8);await expectDuration(8);pass('Reset keeps the selected task countdown at its configured duration');
+  await panel.locator('#btnReset2').click();await expectPrepared(8);await expectDuration(8);pass('Reset restores idle and preserves the selected task configured duration');
   await panel.locator('#btnClear').click();await delay(150);
   assert.equal(JSON.parse(fs.readFileSync(path.join(data,'state.json'))).tasks.length,0);pass('Clear tasks persists empty list');
   await expectClock();
@@ -171,25 +204,40 @@ async function custom(sec){
   pass('Clearing tasks shows an updating local HH:mm:ss clock');
 
   await panel.locator('#btnOpenTaskPage').click();await panel.locator('#inTaskName').fill('</script>秒级检查');await panel.locator('#inTaskMin').fill('0');await panel.locator('#inTaskSec').fill('3');await panel.locator('#btnAddTask').click();
-  await expectDuration(3);await expectCountdown(3);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(data,'state.json'))).tasks[0].sec,3);pass('Three-second task creation replaces the idle clock with its countdown');
+  await expectDuration(3);await expectPrepared(3);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(data,'state.json'))).tasks[0].sec,3);pass('Three-second task creation remains idle and persists its configured duration');
   await panel.locator('#btnOpenTaskPage').click();await panel.locator('#inTaskName').fill('备用任务');await panel.locator('#inTaskSec').fill('5');await panel.locator('#btnAddTask').click();
-  await expectDuration(5);await expectCountdown(5);
-  await panel.locator('.task__select').first().click();await expectDuration(3);await expectCountdown(3);
-  assert.equal(await island.locator('#readoutChip').textContent(),'准备开始');
-  pass('Adding and selecting tasks displays the selected countdown before starting it');
+  await expectDuration(5);await expectPrepared(5);
+  await panel.locator('.task__select').first().click();await expectDuration(3);await expectPrepared(3);
+  await expectQuietChip();assert.equal(await panel.locator('.task.is-active .task__name').textContent(),'</script>秒级检查');
+  pass('Adding and selecting tasks remain idle with no task label before starting');
   await panel.locator('label:has(#swNotify)').click();
-  await panel.locator('#btnStart').click();
+  await panel.locator('#btnStart').click();await expectTaskName('</script>秒级检查');
   await island.waitForFunction(()=>document.querySelector('#island').classList.contains('is-cracking'));
   assert.equal(await island.evaluate(()=>innerWidth),580);
   await delay(220);await island.screenshot({path:path.join(out,'native-crack.png'),omitBackground:true});
   await island.waitForFunction(()=>!document.querySelector('#island').classList.contains('is-finishing'));
-  await digits('00:00:00');assert.equal(await island.locator('#readoutChip').textContent(),'时间到');
+  await digits('00:00:00');assert.equal(await island.locator('#readoutChip').textContent(),'时间到');await expectTaskName('</script>秒级检查');
   assert.equal(await island.evaluate(()=>innerWidth),580);pass('3s completion returns the dial on the stable 580 canvas');
   await island.screenshot({path:path.join(out,'native-done.png'),omitBackground:true});
-  await panel.locator('label:has(#swMotion)').click();await panel.locator('#btnReset2').click();await expectCountdown(3);await expectDuration(3);
+  await panel.waitForFunction(()=>timerEvents.at(-1)?.done===true&&timerEvents.at(-1)?.remainingMs===0);const completedRun=await panel.evaluate(()=>timerEvents.at(-1));
+  await expectCompletedIdle(completedRun);assert.deepEqual(probe().windows.find(w=>w.title==='Focus Island').outer,nativePill.outer);assert.equal(await island.evaluate(()=>innerWidth===580&&innerHeight===580),true);
+  assert.equal(await panel.locator('.task.is-active .task__name').textContent(),'</script>秒级检查');
+  const postCompletionIdleAt=await panel.evaluate(()=>timerEvents.at(-1).at);await expectEyes();assert(Date.now()-postCompletionIdleAt>=9500,'Completed idle starts a fresh ten-second clock slot before eyes');
+  const afterEyes=await panel.evaluate(()=>timerEvents.at(-1));assert.equal(afterEyes.runId,completedRun.runId);assert.equal(afterEyes.idleAfterCompletion,true);assert.equal(afterEyes.done,true);
+  await island.screenshot({path:path.join(out,'native-completed-eyes.png'),omitBackground:true});desktopShot('native-completed-eyes-desktop.png',probe().windows.find(w=>w.title==='Focus Island'));
+  pass('Completion returns to clock after ten seconds, then actual visible eyes after another ten seconds, retaining completed identity and stable canvas');
+  await panel.locator('label:has(#swMotion)').click();await panel.locator('#btnReset2').click();await expectPrepared(3);await expectDuration(3);
   await panel.locator('#btnStart').click();await island.waitForFunction(()=>document.querySelector('#island').classList.contains('is-done'));
   assert.equal(await island.locator('.crack__piece').count(),0);pass('Reduced motion finishes without fragments');
+  await panel.waitForFunction(()=>timerEvents.at(-1)?.done===true&&timerEvents.at(-1)?.runId!==''&&timerEvents.at(-1)?.idleAfterCompletion===false);const reducedRun=await panel.evaluate(()=>timerEvents.at(-1));assert.notEqual(reducedRun.runId,completedRun.runId);
+  await island.locator('#island').evaluate(node=>node.click());await expectCompletedIdle(reducedRun);assert.deepEqual(probe().windows.find(w=>w.title==='Focus Island').outer,nativePill.outer);
+  pass('Clicking a completed island returns immediately to idle without resetting completion facts or changing the selected task');
+  await panel.locator('label:has(#swMotion)').click();await panel.locator('label:has(#swIdleClock)').click();await panel.locator('#btnReset2').click();await expectEyes(2000);
+  await panel.locator('#btnStart').click();await expectTaskName('</script>秒级检查');await panel.waitForFunction(()=>timerEvents.at(-1)?.done===true&&timerEvents.at(-1)?.idleAfterCompletion===false);const eyesOnlyRun=await panel.evaluate(()=>timerEvents.at(-1));assert.notEqual(eyesOnlyRun.runId,reducedRun.runId);
+  await expectCompletedIdle(eyesOnlyRun,'eyes');assert.equal(await island.locator('.crack__piece').count(),0);assert.deepEqual(probe().windows.find(w=>w.title==='Focus Island').outer,nativePill.outer);
+  pass('With only eyes enabled, the completed timer returns directly to actual visible eyes without an extra clock delay');
+  await panel.locator('label:has(#swIdleClock)').click();await panel.locator('label:has(#swMotion)').click();await expectClockPhase();
   const memory=execFileSync('powershell.exe',['-NoProfile','-Command','Get-Process -Id '+child.pid+' | Select-Object Id,WorkingSet64,PrivateMemorySize64 | ConvertTo-Json -Compress'],{windowsHide:true,encoding:'utf8'});
   report.nativeMemory=JSON.parse(memory);pass('Native process memory measurement',report.nativeMemory);
   const cdp=await browser.newBrowserCDPSession();
@@ -200,11 +248,11 @@ async function custom(sec){
   report.totalWorkingSetBytes=report.processMemory.reduce((sum,p)=>sum+p.WorkingSet64,0);
   await cdp.detach();pass('Whole application memory (includes WebView2)',report.totalWorkingSetBytes);
   await stop();await launch();
-  await expectCountdown(3);await expectDuration(3);
+  await expectPrepared(3);await expectDuration(3);
   assert.equal(await panel.locator('.task__name').first().textContent(),'</script>秒级检查');
   assert.equal(await panel.locator('.task').first().evaluate(node=>node.classList.contains('is-active')),true);
   const restore=await panel.evaluate(()=>({second:document.querySelector('#swSecond').checked,motion:document.querySelector('#swMotion').checked}));
-  assert.deepEqual(restore,{second:false,motion:true});pass('Restart restores the selected task countdown, configured seconds, settings and escaped task text');
+  assert.deepEqual(restore,{second:false,motion:true});pass('Restart restores the selected task and configured seconds while starting idle, retaining settings and escaped task text');
   await island.evaluate(()=>window.__selftestOpen());await delay(600);
   await island.evaluate(()=>window.__fromRust('resetTimer'));
   await island.locator('#island').click({position:{x:170,y:15}});

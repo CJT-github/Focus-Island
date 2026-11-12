@@ -51,16 +51,10 @@
 
     <div class="readout">
       <div class="readout__card">
-        <div class="readout__task" id="readoutTask">深度工作</div>
+        <div class="readout__task" id="readoutTask" hidden></div>
         <div class="readout__digits" id="readoutDigits">00:25:00</div>
-        <div class="readout__chip" id="readoutChip">准备开始</div>
+        <div class="readout__chip" id="readoutChip" hidden></div>
       </div>
-    </div>
-
-    <div class="action-status action-status--island" id="islandAction" role="status" aria-live="polite" hidden>
-      <div class="action-status__head"><span class="action-status__label"></span><span class="action-status__phase"></span></div>
-      <div class="action-status__message"></div>
-      <button class="action-status__cancel" id="btnCancelIslandAction" hidden>取消本次执行</button>
     </div>
 
     <div class="island__ctrls">
@@ -149,6 +143,16 @@
     </div>
     <section class="panel__scroll panel-page task-settings-page" id="taskSettingsPage" aria-hidden="true" inert>
       <div class="task-settings-context"><p class="action-scope" id="actionScope"></p><p class="task-settings-duration" id="taskSettingsDuration"></p></div>
+      <section class="mgroup task-duration-editor" aria-labelledby="taskDurationHeading">
+        <div class="mgroup__title" id="taskDurationHeading">专注时长</div>
+        <div class="task-duration-fields">
+          <label class="action-field"><span>分钟</span><input type="number" id="editTaskMin" min="0" max="5999" step="1" aria-label="任务时长分钟" /></label>
+          <label class="action-field"><span>秒</span><input type="number" id="editTaskSec" min="0" max="59" step="1" aria-label="任务时长秒数" /></label>
+          <button class="btn btn--gold btn--sm" id="btnSaveTaskDuration">保存时长</button>
+        </div>
+        <p class="mgroup__note">修改当前任务会暂停并重置倒计时；其他任务不影响当前计时。</p>
+        <p class="mgroup__note" id="taskDurationNote" role="status" aria-live="polite"></p>
+      </section>
       <section class="mgroup" id="completionActionSection">
         <div class="mgroup__title">结束后执行</div>
         <label class="switch"><input type="checkbox" id="actionEnabled" /><span class="switch__ui"></span><span class="switch__text">启用结束动作</span></label>

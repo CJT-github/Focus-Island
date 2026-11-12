@@ -405,6 +405,34 @@ mod tests {
     }
 
     #[test]
+    fn completed_idle_display_does_not_cancel_or_repeat_delayed_actions() {
+        let state = state(30);
+        let now = Instant::now();
+        let mut controller = ActionController::default();
+        controller.observe(&running("idle-run"), &state);
+        controller.observe(&done("idle-run"), &state);
+        assert!(controller.complete(&completion("idle-run"), now));
+        let idle_update: TimerUpdate = serde_json::from_value(serde_json::json!({
+            "runId":"idle-run", "taskId":"t1", "started":true,
+            "running":false, "done":true, "remainingMs":0, "totalMs":3000,
+            "idleAfterCompletion":true
+        })).unwrap();
+        controller.observe(&idle_update, &state);
+        assert_eq!(controller.status().phase, Phase::Pending);
+        assert!(controller.poll(now + Duration::from_secs(10)).is_none());
+        assert_eq!(controller.status().remaining_sec, 20);
+        controller.observe(&idle_update, &state);
+        assert!(!controller.complete(&completion("idle-run"), now + Duration::from_secs(20)));
+        let job = controller.poll(now + Duration::from_secs(30)).unwrap();
+        assert_eq!(job.run_id, "idle-run");
+        let mut calls = Vec::new();
+        controller.finished("idle-run", fake_execute(&job, &mut calls));
+        controller.observe(&idle_update, &state);
+        assert!(controller.poll(now + Duration::from_secs(300)).is_none());
+        assert_eq!(controller.status().phase, Phase::Success);
+        assert_eq!(calls, vec!["idle-run"]);
+    }
+    #[test]
     fn pause_resume_keeps_snapshot_and_config_save_cancels_scope() {
         let mut state = state(1);
         let mut controller = ActionController::default();

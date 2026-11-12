@@ -37,6 +37,9 @@
   let effectGeneration = 0, selftesting = false, durationDraftDirty = false;
   let runId = '', runTaskId = '', runTaskName = '', runSequence = 0;
   let topOffsetDraftDirty = false;
+  let completedIdle = false, completionIdleTimer = null, completionIdleGeneration = 0, completionIdleAt = 0;
+  const taskDurationDrafts = new Map(), taskDurationPending = new Map();
+  let taskDurationSequence = Date.now();
   let actionDraftScope = null, actionDraftRevision = 0;
   const actionDrafts = new Map(), actionPending = new Map();
   let actionStatus = {phase:'idle',runId:''};
@@ -52,16 +55,17 @@
     'inTopOffset','btnApplyTopOffset','topOffsetNote',
     'btnClose','btnStart','btnReset2','btnClear','btnAddTask','btnApplyCustom','expanded',
     'actionScope','actionEnabled','actionKind','actionCommand','actionCommandField','actionDelay','btnSaveAction','actionConfigNote',
-    'islandAction','panelAction','btnCancelIslandAction','btnCancelPanelAction',
+    'panelAction','btnCancelPanelAction',
     'settingsPage','taskCreatePage','taskSettingsPage','taskSettingsDuration','btnOpenTaskPage','btnTaskBack','btnCancelTask','panelTitle',
     'actionKindTrigger','actionKindValue','actionKindMenu',
+    'editTaskMin','editTaskSec','btnSaveTaskDuration','taskDurationNote',
     'createActionEnabled','createActionKind','createActionCommand','createActionCommandField','createActionDelay',
     'createActionKindTrigger','createActionKindValue'
   ].map(id => [id, $('#'+id)]));
 
   const currentTask = () => S.tasks.find(t => t.id === S.current_id);
-  // A selected task takes priority; free timers retain their result until reset.
-  const clockIdle = () => !currentTask() && !timerStarted;
+  // A saved selection chooses the next task; only a started timer occupies the island.
+  const clockIdle = () => completedIdle || !timerStarted;
   const pad = n => String(Math.floor(n)).padStart(2,'0');
   const seconds = ms => Math.max(0, Math.ceil(ms / 1000));
   function fmtHMS(ms) {
@@ -129,15 +133,20 @@
     const clock = clockIdle();
     el.island.classList.toggle('is-clock',clock);
     el.island.classList.toggle('is-hide-idle-clock',clock && !S.settings.showIdleClock);
-    el.readoutTask.textContent = clock ? (S.settings.showIdleClock?'当前时间':'待机') : currentTask()?.name || '自由专注';
-    el.readoutChip.textContent = clock ? (S.tasks.length ? '等待专注' : '暂无任务') : done ? '时间到' : running ? '专注中' : timerStarted ? '已暂停' : '准备开始';
+    const task = currentTask();
+    const taskName = !clock && task ? (runId && runTaskId===task.id && runTaskName ? runTaskName : task.name) : '';
+    el.readoutTask.hidden = !taskName;
+    el.readoutTask.textContent = taskName;
+    el.readoutTask.title = taskName;
+    el.readoutChip.hidden = !done || clock;
+    el.readoutChip.textContent = done && !clock ? '时间到' : '';
     el.island.classList.remove('is-running','is-done','is-idle');
-    el.island.classList.add(done?'is-done':running?'is-running':'is-idle');
+    el.island.classList.add(clock?'is-idle':done?'is-done':running?'is-running':'is-idle');
     el.btnToggle.innerHTML = running
       ? '<svg viewBox="0 0 24 24" class="ico"><rect x="7" y="5" width="3.6" height="14" rx="1.4" fill="currentColor"/><rect x="13.4" y="5" width="3.6" height="14" rx="1.4" fill="currentColor"/></svg>'
       : '<svg viewBox="0 0 24 24" class="ico"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg>';
-    el.btnToggle.setAttribute('aria-label',running?'暂停倒计时':'开始倒计时');
-    el.btnToggle.title = running?'暂停':'开始';
+    el.btnToggle.setAttribute('aria-label',running?'暂停倒计时':done?'再来一次':'开始倒计时');
+    el.btnToggle.title = running?'暂停':done?'再来一次':'开始';
     el.btnStart.textContent = running?'暂停':done?'再来一次':timerStarted?'继续':'开始';
   }
   function renderTasks() {
@@ -246,11 +255,11 @@
     el.panelTitle.textContent=page==='create'?'新增任务':page==='task'?'任务设置':'设置';
     el.btnTaskBack.hidden=page==='settings';
     if (page==='settings') {editingTaskId='';el.settingsPage.scrollTop=settingsScrollTop;}
-    if (page==='task') renderActionConfig();
+    if (page==='task') {renderTaskDuration();renderActionConfig();}
     renderActionStatus();
     requestAnimationFrame(()=>{
       if (panelPage!==page) return;
-      const target=page==='create'?(pendingTaskCreate?el.btnTaskBack:el.inTaskName):page==='task'?el.actionEnabled:
+      const target=page==='create'?(pendingTaskCreate?el.btnTaskBack:el.inTaskName):page==='task'?(taskDurationPending.has(editingTaskId)?el.btnTaskBack:el.editTaskMin):
         $$('.task__edit',el.taskList).find(button=>button.dataset.taskId===settingsReturnTaskId) || el.btnOpenTaskPage;
       target.focus({preventScroll:true});
     });
@@ -266,7 +275,7 @@
   }
   function reconcileTaskEditors() {
     const ids=new Set(S.tasks.map(task=>task.id));
-    for (const drafts of [actionDrafts,actionPending]) for (const id of drafts.keys()) if(!ids.has(id))drafts.delete(id);
+    for (const drafts of [actionDrafts,actionPending,taskDurationDrafts,taskDurationPending]) for (const id of drafts.keys()) if(!ids.has(id))drafts.delete(id);
     if (actionDraftScope && !ids.has(actionDraftScope)) actionDraftScope=null;
     if (panelPage==='task' && !ids.has(editingTaskId)) setPanelPage('settings');
   }
@@ -359,6 +368,40 @@
     window.addEventListener('blur',()=>{if(kindMenuOpen)closeActionKindMenu();});
     document.addEventListener('visibilitychange',()=>{if(document.hidden && kindMenuOpen)closeActionKindMenu();});
   }
+  function renderTaskDuration() {
+    if (!isPanel || panelPage!=='task') return;
+    const task=editingTask();if(!task)return;
+    const draft=taskDurationDrafts.get(task.id),busy=taskDurationPending.has(task.id);
+    const minutes=String(draft?draft.minutes:Math.floor(task.sec/60));
+    const secs=String(draft?draft.seconds:task.sec%60);
+    if (el.editTaskMin.value!==minutes) el.editTaskMin.value=minutes;
+    if (el.editTaskSec.value!==secs) el.editTaskSec.value=secs;
+    el.editTaskMin.setAttribute('aria-invalid',String(!!draft?.minInvalid));
+    el.editTaskSec.setAttribute('aria-invalid',String(!!draft?.secInvalid));
+    for (const node of [el.editTaskMin,el.editTaskSec,el.btnSaveTaskDuration]) node.disabled=busy;
+    el.btnSaveTaskDuration.textContent=busy?'保存中…':'保存时长';
+    el.taskDurationNote.textContent=busy?'正在保存…':draft?.note || '';
+    el.taskDurationNote.classList.toggle('is-error',!busy && !!draft?.error);
+  }
+  function rememberTaskDuration() {
+    const task=editingTask();if(panelPage!=='task' || !task || taskDurationPending.has(task.id))return;
+    taskDurationDrafts.set(task.id,{minutes:el.editTaskMin.value,seconds:el.editTaskSec.value,note:'尚未保存'});
+    renderTaskDuration();
+  }
+  function saveTaskDuration() {
+    const task=editingTask();if(panelPage!=='task' || !task || taskDurationPending.has(task.id))return;
+    const values=[el.editTaskMin,el.editTaskSec].map(inputValue),sec=values[0]*60+values[1];
+    const draft={minutes:el.editTaskMin.value,seconds:el.editTaskSec.value,
+      minInvalid:values[0]===null,secInvalid:values[1]===null};
+    if(values.includes(null) || sec<1 || sec>MAX_SEC) {
+      draft.error=true;draft.note=values.includes(null)?'请输入整数：分 0–5999，秒 0–59':'任务时长应为 1 秒至 99 小时 59 分 59 秒';
+      taskDurationDrafts.set(task.id,draft);renderTaskDuration();return;
+    }
+    taskDurationDrafts.set(task.id,draft);
+    const requestId=++taskDurationSequence;
+    taskDurationPending.set(task.id,{requestId,sec});renderTaskDuration();
+    send({type:'setTaskDuration',taskId:task.id,sec,requestId});
+  }
   function renderActionConfig() {
     if (!isPanel || panelPage!=='task') return;
     const task=editingTask();if(!task)return;
@@ -399,11 +442,12 @@
     send({type:'setCompletionAction',taskId:scope,action});
   }
   function renderActionStatus() {
+    if (!isPanel) return;
     const phase=actionStatus.phase,visible=phase!=='idle';
     const phases={armed:'已准备',pending:'等待执行',running:'执行中',success:'已完成',error:'执行失败',cancelled:'已取消'};
     const remaining=Number(actionStatus.remainingSec);
     const phaseText=phase==='pending'&&Number.isFinite(remaining)?Math.max(0,Math.ceil(remaining))+' 秒后执行':phases[phase]||'';
-    for (const node of [el.islandAction,el.panelAction]) {
+    for (const node of [el.panelAction]) {
       node.hidden=!visible || (node===el.panelAction && (panelPage!=='task' || !editingTaskId || actionStatus.taskId!==editingTaskId));node.dataset.phase=phase;
       $('.action-status__label',node).textContent=String(actionStatus.label || '结束后执行');
       $('.action-status__phase',node).textContent=phaseText;
@@ -448,7 +492,7 @@
     el.swSecond.disabled = !S.settings.showHands;
     // Position and duration edits are independent of unrelated state broadcasts.
     if (!topOffsetDraftDirty) el.inTopOffset.value = S.settings.topOffset;
-    renderTasks();reconcileTaskEditors();renderActionConfig();renderActionStatus();
+    renderTasks();reconcileTaskEditors();renderTaskDuration();renderActionConfig();renderActionStatus();
   }
   function renderAll() {
     renderState(); renderTime(); renderPanel();
@@ -459,10 +503,10 @@
   function publishTimer(force = false) {
     if (isPanel) return;
     const taskId=runId?runTaskId:(currentTask()?.id || '');
-    const key = [runId,taskId,running,done,timerStarted,seconds(remain),total].join(':');
+    const key = [runId,taskId,running,done,timerStarted,completedIdle,seconds(remain),total].join(':');
     if (force || key !== lastTimerMessage) {
       lastTimerMessage = key;
-      send({type:'timerState',runId,taskId,running,done,started:timerStarted,remainingMs:remain,totalMs:total});
+      send({type:'timerState',runId,taskId,running,done,started:timerStarted,idleAfterCompletion:completedIdle,remainingMs:remain,totalMs:total});
     }
   }
   function stopTick() { clearInterval(tickTimer); tickTimer = null; }
@@ -482,8 +526,25 @@
       });
     }
   }
+  function cancelCompletionIdle() {
+    clearTimeout(completionIdleTimer);completionIdleTimer=null;completionIdleAt=0;++completionIdleGeneration;
+  }
+  function reconcileCompletionIdle() {
+    if (!isPanel && done && !completedIdle && completionIdleAt && Date.now()>=completionIdleAt) returnToCompletedIdle();
+  }
+  function resumeView() {
+    sampleTime();reconcileCompletionIdle();scheduleClock();
+  }
+  function returnToCompletedIdle() {
+    if (isPanel || !done || completedIdle) return;
+    cancelCompletionIdle();completedIdle=true;
+    // Keep runId, completion facts and pending native actions intact: this is
+    // presentation only, unlike reset(). Closing cancels any stale effect ACK.
+    cancelEffect();renderTime();renderState();closeIsland();scheduleClock();publishTimer(true);
+  }
   function reset() {
     if (isPanel) return;
+    cancelCompletionIdle();completedIdle=false;
     cancelEffect(); stopTick();
     running = false; done = false; timerStarted = false; runId='';runTaskId='';runTaskName='';
     total = S.duration_sec*1000; remain = total;
@@ -497,6 +558,7 @@
   }
   function start() {
     if (isPanel || running) return;
+    cancelCompletionIdle();completedIdle=false;
     if (done || remain<=0) reset();
     if (!runId) {runId=nextRunId();runTaskId=currentTask()?.id || '';runTaskName=currentTask()?.name || '自由专注';}
     running = true; done = false; timerStarted = true; deadline = Date.now()+remain;
@@ -512,6 +574,12 @@
   function toggle() { if (!isPanel) running ? pause() : start(); }
   function finish() {
     running = false; done = true; remain = 0; stopTick();
+    cancelCompletionIdle();completedIdle=false;
+    completionIdleAt=Date.now()+10000;
+    const generation=completionIdleGeneration,finishedRun=runId;
+    completionIdleTimer=setTimeout(()=>{
+      if(generation===completionIdleGeneration && done && runId===finishedRun) reconcileCompletionIdle();
+    },10000);
     renderTime(); renderState(); publishTimer(true);
     crack();
     send({type:'timerDone',runId,taskId:runTaskId,task:runTaskName || currentTask()?.name || '自由专注'});
@@ -525,7 +593,7 @@
   let clockFrame = null, clockWake = null;
 
   let idleEyesActive = false, idlePageActive = true;
-  let idleCycleTimer = null, idleCycleEyes = false;
+  let idleCycleTimer = null, idleCycleEyes = false, idleCycleAt = 0;
   let idleEyesFollowing = false, idleEyesFollowUntil = 0;
   const idleEyesTimers = new Set();
   const randomBetween = (min,max) => min+Math.random()*(max-min);
@@ -602,21 +670,27 @@
     },randomBetween(1500,3000));
   }
   function stopIdleCycle() {
-    clearTimeout(idleCycleTimer);idleCycleTimer=null;idleCycleEyes=false;
+    clearTimeout(idleCycleTimer);idleCycleTimer=null;idleCycleEyes=false;idleCycleAt=0;
   }
   function queueIdleCycle() {
+    clearTimeout(idleCycleTimer);
     idleCycleTimer=setTimeout(()=>{
-      idleCycleEyes=!idleCycleEyes;
-      queueIdleCycle();
-      syncIdleEyes();
-    },10000);
+      idleCycleTimer=null;syncIdleEyes();
+    },Math.max(0,idleCycleAt-Date.now()));
   }
   function syncIdleEyes() {
     if (!idleEyesEligible()) {stopIdleCycle();stopIdleEyes();return;}
     if (S.settings.showIdleClock) {
       // Both enabled: clock first, then eyes, ten seconds each. Clock ticks and
       // unrelated settings refreshes must not reset this independent schedule.
-      if (idleCycleTimer===null) {idleCycleEyes=false;queueIdleCycle();}
+      const now=Date.now();
+      if (!idleCycleAt) {idleCycleEyes=false;idleCycleAt=now+10000;}
+      if (now>=idleCycleAt) {
+        const slots=Math.floor((now-idleCycleAt)/10000)+1;
+        if (slots%2) idleCycleEyes=!idleCycleEyes;
+        idleCycleAt+=slots*10000;
+      }
+      queueIdleCycle();
       if (!idleCycleEyes) {stopIdleEyes();return;}
     } else stopIdleCycle();
     if (idleEyesActive) return;
@@ -848,25 +922,27 @@
     if (isPanel) return;
     el.expanded.inert = true;
     el.island.addEventListener('click',e=>{
-      e.stopPropagation(); if (!effectActive) isOpen()?closeIsland():openIsland();
+      e.stopPropagation();
+      if (done && !completedIdle) returnToCompletedIdle();
+      else if (!effectActive) isOpen()?closeIsland():openIsland();
     });
     el.island.addEventListener('contextmenu',e=>{
       e.preventDefault(); e.stopPropagation(); send({type:'togglePanel'});
     });
-    el.island.addEventListener('mouseenter',()=>send({type:'hover',over:true}));
+    el.island.addEventListener('mouseenter',()=>{reconcileCompletionIdle();send({type:'hover',over:true});});
     el.island.addEventListener('mouseleave',()=>send({type:'hover',over:false}));
     el.btnToggle.addEventListener('click',e=>{e.stopPropagation();toggle();});
     el.btnReset.addEventListener('click',e=>{e.stopPropagation();reset();});
-    el.btnCancelIslandAction.addEventListener('click',cancelCompletionAction);
     document.addEventListener('keydown',e=>{
       if (e.key==='Escape') closeIsland();
-      if (e.key==='Enter' && e.target===el.island) {e.preventDefault(); isOpen()?closeIsland():openIsland();}
+      if (e.key==='Enter' && e.target===el.island) {e.preventDefault(); if(done && !completedIdle)returnToCompletedIdle();else if(!effectActive)isOpen()?closeIsland():openIsland();}
       if (e.key===' ' && !e.target.matches('input,button')) {e.preventDefault();toggle();}
     });
-    document.addEventListener('visibilitychange',()=>{sampleTime();scheduleClock();});
+    document.addEventListener('visibilitychange',resumeView);
     motionPreference.addEventListener('change',syncIdleEyes);
     window.addEventListener('pagehide',()=>{idlePageActive=false;stopIdleCycle();stopIdleEyes();});
-    window.addEventListener('pageshow',()=>{idlePageActive=true;syncIdleEyes();});
+    window.addEventListener('pageshow',()=>{idlePageActive=true;resumeView();});
+    window.addEventListener('focus',resumeView);
   }
   function inputValue(node) {
     const value = Number(node.value);
@@ -944,6 +1020,13 @@
     el.createActionKind.addEventListener('change',showCreateActionFields);
     showCreateActionFields();
     el.btnSaveAction.addEventListener('click',saveCompletionAction);
+    for (const node of [el.editTaskMin,el.editTaskSec]) {
+      node.addEventListener('input',rememberTaskDuration);
+      node.addEventListener('keydown',e=>{
+        if(e.key==='Enter' && !e.isComposing && !e.repeat){e.preventDefault();saveTaskDuration();}
+      });
+    }
+    el.btnSaveTaskDuration.addEventListener('click',saveTaskDuration);
     el.btnCancelPanelAction.addEventListener('click',cancelCompletionAction);
     el.btnStart.addEventListener('click',()=>send({type:'toggleTimer'}));
     el.btnReset2.addEventListener('click',()=>send({type:'resetTimer'}));
@@ -967,12 +1050,31 @@
 
   window.__applyState = (state,resetTimer=false) => {
     if (!state) return;
-    const previousDuration = S.duration_sec;
+    const previousDuration = S.duration_sec,previousTaskId = S.current_id;
     S = {...S,...state,settings:{...S.settings,...state.settings}};
     S.duration_sec = duration(S.duration_sec);
-    if (resetTimer || S.duration_sec!==previousDuration) durationDraftDirty=false;
-    if (!isPanel && (resetTimer || S.duration_sec!==previousDuration)) reset();
+    if (resetTimer || S.duration_sec!==previousDuration || S.current_id!==previousTaskId) {
+      durationDraftDirty=false;
+      if (!isPanel) reset();else completedIdle=false;
+    }
     renderAll();
+  };
+  window.__taskDurationResult = payload => {
+    if (!isPanel || !payload) return;
+    const pending=taskDurationPending.get(payload.taskId);
+    if (!pending || pending.requestId!==payload.requestId) return;
+    taskDurationPending.delete(payload.taskId);
+    const task=S.tasks.find(task=>task.id===payload.taskId);if(!task)return;
+    if (payload.ok) {
+      task.sec=pending.sec;taskDurationDrafts.delete(task.id);
+    } else {
+      const draft=taskDurationDrafts.get(task.id) || {minutes:String(Math.floor(pending.sec/60)),seconds:String(pending.sec%60)};
+      taskDurationDrafts.set(task.id,{...draft,error:true,note:String(payload.message || '保存失败，请重试')});
+    }
+    if(panelPage==='task' && editingTaskId===task.id) {
+      renderTaskDuration();renderActionConfig();
+      if(payload.ok)el.taskDurationNote.textContent=String(payload.message || '时长已保存');
+    }
   };
   window.__taskCreateResult = payload => {
     if (!isPanel || !pendingTaskCreate || !payload || payload.requestId!==pendingTaskCreate.requestId) return;
@@ -989,6 +1091,7 @@
     running=!!payload.running;done=!!payload.done;
     remain=Math.max(0,Number(payload.remainingMs)||0);total=Math.max(1,Number(payload.totalMs)||1);
     timerStarted=payload.started ?? (running || done || remain<total);
+    completedIdle=!!payload.idleAfterCompletion && done;
     runId=typeof payload.runId==='string'?payload.runId:'';runTaskId=typeof payload.taskId==='string'?payload.taskId:'';
     renderTime();renderState();
   };
@@ -1015,7 +1118,7 @@
     if (isPanel) return;
     if (command==='toggleTimer') toggle();
     else if (command==='resetTimer') reset();
-    else if (command==='syncTimer') publishTimer(true);
+    else if (command==='syncTimer') {reconcileCompletionIdle();publishTimer(true);}
   };
   window.__isOpen = isOpen;
   window.__selftestOpen = () => openIsland();
