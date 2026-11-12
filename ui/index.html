@@ -123,6 +123,11 @@
 
       <section class="mgroup">
         <div class="mgroup__title">显示与提醒</div>
+        <div class="top-offset">
+          <label class="field top-offset__field" for="inTopOffset"><span>距顶部</span><input type="number" id="inTopOffset" min="0" max="1000" step="1" value="20" aria-describedby="topOffsetNote" /><span class="top-offset__unit">px</span></label>
+          <button class="btn btn--sm" id="btnApplyTopOffset">应用</button>
+        </div>
+        <p class="mgroup__note top-offset__note" id="topOffsetNote" role="status" aria-live="polite">默认 20 px，超出屏幕时自动贴合可用区域。</p>
         <label class="switch"><input type="checkbox" id="swHands" checked /><span class="switch__ui"></span><span class="switch__text">显示真实时钟指针</span></label>
         <label class="switch"><input type="checkbox" id="swSecond" checked /><span class="switch__ui"></span><span class="switch__text">显示秒针</span></label>
         <label class="switch"><input type="checkbox" id="swIdleClock" checked /><span class="switch__ui"></span><span class="switch__text">待机时间</span></label>

@@ -95,6 +95,73 @@ async function run(options = {}) {
     assert.deepEqual((await panel.evaluate(()=>messages)).slice(-2).map(m=>m.type),['hidePanel','hidePanel']);
     checks.push('panel commands, second precision, duration validation, draft preservation and close behavior');
 
+    // Moving the native island is a preference-only change. Exercise the actual
+    // editor and relay its IPC to an island without resetting the timer.
+    const positionPanel=await browser.newPage({viewport:{width:340,height:620}});
+    const positionIsland=await browser.newPage({viewport:{width:580,height:580}});
+    for (const page of [positionPanel,positionIsland]) {
+      page.on('pageerror',error=>errors.push(error.message));
+      await page.addInitScript(()=>{
+        window.messages=[];
+        window.ipc={postMessage(value){messages.push(JSON.parse(value));}};
+      });
+      await page.goto('about:blank');
+    }
+    await positionPanel.setContent(html('panel'));
+    await positionIsland.setContent(html('island'));
+    assert.equal(await positionPanel.inputValue('#inTopOffset'),'20','legacy settings default to 20 px');
+    await positionPanel.evaluate(s=>__applyState({...s,settings:{...s.settings,topOffset:80}}),state);
+    assert.equal(await positionPanel.inputValue('#inTopOffset'),'80');
+    await positionPanel.fill('#inH','7');
+    await positionPanel.fill('#inTopOffset','92');
+    await positionPanel.evaluate(s=>__applyState({...s,settings:{...s.settings,topOffset:80,sound:true}}),state);
+    assert.equal(await positionPanel.inputValue('#inTopOffset'),'92','unrelated broadcasts preserve a position draft');
+    assert.equal(await positionPanel.inputValue('#inH'),'7');
+    await positionPanel.press('#inTopOffset','Enter');
+    const offsetUpdate=await positionPanel.evaluate(()=>messages.at(-1));
+    assert.equal(offsetUpdate.type,'updateSettings');assert.equal(offsetUpdate.settings.topOffset,92);
+    assert.equal(offsetUpdate.settings.sound,true);assert.equal(offsetUpdate.settings.showHands,true);
+    assert.equal(await positionPanel.inputValue('#inH'),'7','applying position preserves an unfinished duration');
+    const updateCount=await positionPanel.evaluate(()=>messages.length);
+    for (const invalid of ['', '-1', '1001', '1.5']) {
+      await positionPanel.fill('#inTopOffset',invalid);await positionPanel.click('#btnApplyTopOffset');
+      assert.equal(await positionPanel.evaluate(()=>messages.length),updateCount);
+      assert.equal(await positionPanel.getAttribute('#inTopOffset','aria-invalid'),'true');
+      assert.match(await positionPanel.textContent('#topOffsetNote'),/0–1000/);
+    }
+    for (const valid of ['0','1000']) {
+      await positionPanel.fill('#inTopOffset',valid);await positionPanel.click('#btnApplyTopOffset');
+      assert.equal(await positionPanel.evaluate(()=>messages.at(-1).settings.topOffset),Number(valid));
+      assert.equal(await positionPanel.getAttribute('#inTopOffset','aria-invalid'),'false');
+    }
+    await positionPanel.evaluate(s=>__applyState({...s,settings:{...s.settings,topOffset:1000}}),state);
+    assert.equal(await positionPanel.inputValue('#inTopOffset'),'1000');
+    const offsetBounds=await positionPanel.locator('.top-offset').boundingBox();
+    const offsetButtonBounds=await positionPanel.locator('#btnApplyTopOffset').boundingBox();
+    assert(offsetBounds.x>=0 && offsetBounds.x+offsetBounds.width<=340);
+    assert(offsetButtonBounds.x+offsetButtonBounds.width<=offsetBounds.x+offsetBounds.width+1);
+    assert((await positionPanel.evaluate(()=>messages)).every(message=>['pageReady','updateSettings'].includes(message.type)));
+
+    await positionIsland.clock.setFixedTime(new Date('2030-01-01T12:00:00Z'));
+    const stableTimer=()=>positionIsland.evaluate(()=>{
+      __fromRust('syncTimer');return messages.filter(message=>message.type==='timerState').at(-1);
+    });
+    const applyPosition=()=>positionIsland.evaluate(settings=>__applyState({settings},false),offsetUpdate.settings);
+    const selectedIdle=await stableTimer();await applyPosition();
+    assert.deepEqual(await stableTimer(),selectedIdle);await expectCountdown(positionIsland,65);
+    await positionIsland.evaluate(()=>__fromRust('toggleTimer'));
+    const runningPosition=await stableTimer();assert.equal(runningPosition.running,true);
+    await applyPosition();assert.deepEqual(await stableTimer(),runningPosition,'moving a running island preserves run identity and deadline');
+    await positionIsland.evaluate(()=>__fromRust('toggleTimer'));
+    const pausedPosition=await stableTimer();assert.equal(pausedPosition.running,false);assert.equal(pausedPosition.started,true);
+    await applyPosition();assert.deepEqual(await stableTimer(),pausedPosition);
+    await positionIsland.evaluate(s=>__applyState({...s,tasks:[],current_id:''},true),state);
+    const freeIdle=await stableTimer();await applyPosition();assert.deepEqual(await stableTimer(),freeIdle);await expectClock(positionIsland);
+    await positionIsland.evaluate(()=>{__fromRust('toggleTimer');__fromRust('toggleTimer');});
+    const freePaused=await stableTimer();await applyPosition();assert.deepEqual(await stableTimer(),freePaused);await expectCountdown(positionIsland,65);
+    await positionPanel.close();await positionIsland.close();
+    checks.push('top offset defaults to 20 px, validates 0–1000 integers, preserves both drafts and settings, fits the panel, and never resets task/free or running/paused timers');
+
     await island.evaluate(()=>__fromRust('toggleTimer'));await island.waitForTimeout(450);
     await island.evaluate(s=>__applyState({...s,current_id:'b'},true),state);
     let timer = await island.evaluate(()=>messages.filter(m=>m.type==='timerState').at(-1));

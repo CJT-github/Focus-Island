@@ -386,6 +386,12 @@ body[data-view]{background:transparent}
   font-family:var(--mono);text-align:center;
 }
 .field input:focus{outline:none;border-color:rgba(232,194,104,.35);box-shadow:inset 0 2px 4px rgba(0,0,0,.22),0 0 0 2px rgba(232,194,104,.07)}
+.top-offset{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:2px 0}
+.top-offset .top-offset__field{gap:8px;font-size:12.5px;color:var(--text-2)}
+.top-offset .top-offset__field input{width:64px;padding:6px;font-variant-numeric:tabular-nums}
+.top-offset__unit{font-size:11px;color:var(--text-3)}
+.top-offset__note{margin:5px 0 8px;line-height:1.5}
+
 input[type=number]{-moz-appearance:textfield}
 input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 

@@ -11,6 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 两位小时输入可表示的最长倒计时：99:59:59。
 pub const MAX_DURATION_SEC: u64 = 99 * 3600 + 59 * 60 + 59;
+/// 屏幕顶部间距使用逻辑像素；应用定位时再换算为设备像素。
+pub const DEFAULT_TOP_OFFSET: u32 = 20;
+pub const MAX_TOP_OFFSET: u32 = 1000;
 const MAX_TASK_NAME_CHARS: usize = 120;
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -179,6 +182,16 @@ impl Task {
     }
 }
 
+/// 此字段独立容错，避免一项显示偏好损坏导致整份任务配置回退。
+/// 仅接受数值整值；负数/过大值截到边界，其余类型和小数使用默认值。
+fn deserialize_top_offset<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_f64()
+        .filter(|value| value.is_finite() && value.fract() == 0.0)
+        .map(|value| value.clamp(0.0, f64::from(MAX_TOP_OFFSET)) as u32)
+        .unwrap_or(DEFAULT_TOP_OFFSET))
+}
+
 /// 显示与提醒偏好。IPC 使用 camelCase，旧版磁盘文件的 snake_case 仍可读。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -197,6 +210,8 @@ pub struct Settings {
     pub always_on_top: bool,
     #[serde(alias = "reduce_motion")]
     pub reduce_motion: bool,
+    #[serde(alias = "top_offset", deserialize_with = "deserialize_top_offset")]
+    pub top_offset: u32,
 }
 
 impl Default for Settings {
@@ -210,7 +225,15 @@ impl Default for Settings {
             notify: false,
             always_on_top: true,
             reduce_motion: false,
+            top_offset: DEFAULT_TOP_OFFSET,
         }
+    }
+}
+
+impl Settings {
+    /// 也保护 Rust 直接构造的设置；反序列化入口已处理类型与负值。
+    pub fn normalize_top_offset(&mut self) {
+        self.top_offset = self.top_offset.min(MAX_TOP_OFFSET);
     }
 }
 
@@ -268,6 +291,7 @@ impl AppState {
         }
         self.current_id = self.current_task().map(|task| task.id.clone()).unwrap_or_default();
         self.duration_sec = self.duration_sec.clamp(1, MAX_DURATION_SEC);
+        self.settings.normalize_top_offset();
     }
 
     /// 载入状态；文件缺失时初始化，损坏或读取失败时记录原因并使用默认状态。
@@ -344,6 +368,81 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
             let _ = std::fs::remove_dir(self.0.parent().unwrap());
+        }
+    }
+
+    #[test]
+    fn legacy_file_without_top_offset_keeps_tasks_and_defaults_to_twenty() {
+        let file = TestFile::new();
+        std::fs::write(&file.0,
+            r#"{"tasks":[{"id":"kept","name":"原有任务","sec":7}],"current_id":"kept","duration_sec":11,"settings":{"sound":false,"reduceMotion":true}}"#,
+        ).unwrap();
+        let loaded = AppState::load(&file.0);
+        assert_eq!(Settings::default().top_offset, 20);
+        assert_eq!(serde_json::from_str::<Settings>("{}").unwrap().top_offset, 20);
+        assert_eq!(loaded.settings.top_offset, 20);
+        assert_eq!(loaded.tasks.len(), 1);
+        assert_eq!(loaded.tasks[0].name, "原有任务");
+        assert_eq!(loaded.tasks[0].sec, 7);
+        assert_eq!(loaded.current_id, "kept");
+        assert_eq!(loaded.duration_sec, 11);
+        assert!(!loaded.settings.sound);
+        assert!(loaded.settings.reduce_motion);
+    }
+
+    #[test]
+    fn top_offset_roundtrips_frontend_key_alias_and_normalized_boundaries() {
+        let file = TestFile::new();
+        let mut state = AppState::default();
+        for offset in [0, 20, 384, 1000] {
+            state.settings = serde_json::from_value(
+                serde_json::json!({"topOffset": offset}),
+            ).unwrap();
+            assert_eq!(state.settings.top_offset, offset);
+            state.save_to_path(&file.0).unwrap();
+            let saved: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&file.0).unwrap(),
+            ).unwrap();
+            assert_eq!(saved["settings"]["topOffset"], offset);
+            assert!(saved["settings"].get("top_offset").is_none());
+            assert_eq!(AppState::load(&file.0).settings.top_offset, offset);
+        }
+        let legacy: Settings = serde_json::from_str(r#"{"top_offset":42}"#).unwrap();
+        assert_eq!(legacy.top_offset, 42);
+        state.settings.top_offset = u32::MAX;
+        state.save_to_path(&file.0).unwrap();
+        assert_eq!(AppState::load(&file.0).settings.top_offset, MAX_TOP_OFFSET);
+        state.settings.normalize_top_offset();
+        assert_eq!(state.settings.top_offset, MAX_TOP_OFFSET);
+    }
+
+    #[test]
+    fn invalid_top_offsets_never_discard_tasks_or_other_preferences() {
+        let file = TestFile::new();
+        for (raw, expected) in [
+            ("null", 20), ("true", 20), (r#""40""#, 20), ("{}", 20), ("[]", 20),
+            ("3.5", 20), ("-3.5", 20), ("1000.5", 20),
+            ("-1", 0), ("-9223372036854775808", 0), ("-1e300", 0),
+            ("1001", 1000), ("18446744073709551615", 1000), ("1e300", 1000),
+            ("20.0", 20), ("0", 0), ("1e3", 1000),
+        ] {
+            let mut value = serde_json::json!({
+                "tasks":[{"id":"kept","name":"保留任务","sec":7}],
+                "current_id":"kept", "duration_sec":11,
+                "settings":{"sound":false, "showHands":false, "reduceMotion":true},
+            });
+            value["settings"]["topOffset"] = serde_json::from_str(raw).unwrap();
+            std::fs::write(&file.0, serde_json::to_vec(&value).unwrap()).unwrap();
+            let loaded = AppState::load(&file.0);
+            assert_eq!(loaded.settings.top_offset, expected, "topOffset={raw}");
+            assert_eq!(loaded.tasks.len(), 1, "topOffset={raw}");
+            assert_eq!(loaded.tasks[0].name, "保留任务");
+            assert_eq!(loaded.tasks[0].sec, 7);
+            assert_eq!(loaded.current_id, "kept");
+            assert_eq!(loaded.duration_sec, 11);
+            assert!(!loaded.settings.sound);
+            assert!(!loaded.settings.show_hands);
+            assert!(loaded.settings.reduce_motion);
         }
     }
 

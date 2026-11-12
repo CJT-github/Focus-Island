@@ -53,6 +53,8 @@ macOS 的窗口、菜单、通知、数据目录和命令类型已按平台适�
 
 工程包由 `tools/package-source.ps1` 生成，只包含源码、锁定依赖清单、测试/构建脚本和说明，不包含编译缓存、测试数据、用户配置或登录凭据。
 
+在设置的“显示与提醒”中调整“距顶部”，支持 0–1000 px，默认 20 px。点击“应用”或按 Enter 后立即移动，重启保留；超出屏幕可用区域时自动限制位置，展开、收起与计时状态不受影响。Windows 按屏幕顶部计距，Mac 按菜单栏下方的可用区域顶部计距。
+
 ## 自检与回归
 
 ~~~powershell
@@ -76,6 +78,7 @@ Get-Content .\tools\verify\selftest.log
 ~~~powershell
 node .\tools\verify-frontend.cjs
 node .\tools\verify-native.cjs
+node .\tools\verify-top-offset.cjs
 node .\tools\verify-flicker.cjs after .\dist\FocusIsland.exe
 node .\tools\verify-completion-actions.cjs
 node .\tools\verify-completion-actions.cjs --native .\dist\FocusIsland.exe
@@ -90,7 +93,7 @@ node .\tools\verify-idle-eyes.cjs --native .\dist\FocusIsland.exe
 | 文件 | 职责 |
 |---|---|
 | src/main.rs | IPC 路由、双窗口生命周期、托盘菜单、自检、统一诊断日志 |
-| src/window.rs | 多显示器原点与 DPI、顶部 20px 锚定与水平居中、设置面板工作区限制、原生点击区域、提示音与通知 |
+| src/window.rs | 多显示器原点与 DPI、可配置顶部距离与水平居中、设置面板工作区限制、原生点击区域、提示音与通知 |
 | src/state.rs | 状态验证、兼容旧偏好字段、唯一任务 ID、动作配置与原子保存 |
 | src/actions.rs | 每轮动作快照、延迟取消、一次执行校验与后台命令执行 |
 | ui/app.js | 唯一计时器、真实时钟、可配置待机与鼠标注视、设置交互、裂开特效 |

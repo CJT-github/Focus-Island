@@ -2,7 +2,7 @@
 //! Geometry is kept in Cocoa points so mixed-Retina monitor origins never share
 //! an incorrectly scaled physical desktop coordinate system.
 
-use super::{island_hit_test, overlay_mouse_policy, IslandShape, Window, DIAL, EFFECT, PANEL_H, PANEL_W, TOP_OFFSET};
+use super::{bounded_top_offset, island_hit_test, overlay_mouse_policy, IslandShape, Window, DIAL, EFFECT, PANEL_H, PANEL_W};
 use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::{Bool, ProtocolObject};
@@ -56,15 +56,17 @@ pub(super) fn configure_overlay(window: &Window) {
         | NSWindowCollectionBehavior::FullScreenAuxiliary);
 }
 
-pub(super) fn resize_to(window: &Window, shape: IslandShape) -> bool {
+pub(super) fn resize_to(window: &Window, shape: IslandShape, top_offset: f64) -> bool {
     let Some(native) = native_window(window) else { return false; };
     let Some(screen) = screen_for(native) else { return false; };
     let area = screen.visibleFrame();
-    // AppKit's origin is bottom-left. Leave the visible island 20 points below
-    // the usable top edge (menu bar/notch excluded) while preserving the canvas.
+    let top_offset = bounded_top_offset(top_offset, 0.0, area.size.height);
+    // AppKit's origin is bottom-left. Apply the configured distance below the
+    // usable top edge (menu bar/notch excluded), reserving the expanded dial.
+    // Every shape keeps the same 580-point canvas and viewport origin.
     let content = NSRect::new(
         NSPoint::new(area.origin.x + (area.size.width - EFFECT) / 2.0,
-            area.origin.y + area.size.height - TOP_OFFSET + (EFFECT - DIAL) / 2.0 - EFFECT),
+            area.origin.y + area.size.height - top_offset + (EFFECT - DIAL) / 2.0 - EFFECT),
         NSSize::new(EFFECT, EFFECT),
     );
     let desired = native.frameRectForContentRect(content);

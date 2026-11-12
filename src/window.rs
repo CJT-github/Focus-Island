@@ -11,8 +11,8 @@ use tao::window::Window;
 pub const PILL_W: f64 = 132.0;
 pub const PILL_H: f64 = 38.0;
 pub const DIAL: f64 = 340.0;
-/// Distance from the monitor top to the visible pill/dial, in logical pixels.
-pub const TOP_OFFSET: f64 = 20.0;
+/// Fallback only for invalid layout input; normal offsets come from settings.
+const DEFAULT_TOP_OFFSET: f64 = 20.0;
 /// Extra transparent space prevents the completion fragments from being clipped.
 pub const EFFECT: f64 = 580.0;
 /// Bounded CSS shadow halo, plus a separate device-pixel GDI rasterization guard.
@@ -40,13 +40,37 @@ struct ScreenRect {
     height: u32,
 }
 
+/// Clamp only the actual position, leaving the requested setting unchanged.
+/// All shapes reserve the expanded dial's height so opening never moves the island.
+/// Bounds and offsets are logical distances from the same top-edge coordinate.
+fn bounded_top_offset(requested: f64, visible_top: f64, visible_bottom: f64) -> f64 {
+    let requested = if requested.is_finite() { requested.clamp(0.0, 1000.0) }
+        else { DEFAULT_TOP_OFFSET };
+    let minimum = visible_top.max(0.0);
+    let maximum = (visible_bottom - DIAL).max(minimum);
+    requested.clamp(minimum, maximum)
+}
+
 /// The backing canvas never changes during pill/dial/effect transitions.
-/// Only the native visible region changes, so WebView2 keeps its rendered surface.
+/// Windows offsets remain relative to the monitor top, including negative origins;
+/// work-area bounds keep the expanded dial above the taskbar without shifting the
+/// usual 20-pixel default. A top-mounted taskbar raises only the minimum position.
 #[cfg(any(not(target_os = "macos"), test))]
-fn island_position(monitor_w: u32, window_w: u32, scale: f64) -> (i32, i32) {
-    let x = (monitor_w as i64 - window_w as i64) as i32 / 2;
-    let y = ((TOP_OFFSET - (EFFECT - DIAL) / 2.0) * scale).round() as i32;
-    (x, y)
+fn island_position(monitor: ScreenRect, work_area: ScreenRect, window_w: u32,
+                   scale: f64, top_offset: f64) -> (i32, i32) {
+    let x = monitor.x + (monitor.width as i64 - window_w as i64) as i32 / 2;
+    let visible_top_px = (work_area.y as f64 - monitor.y as f64)
+        .clamp(0.0, monitor.height as f64);
+    let visible_bottom_px = (work_area.y as f64 + work_area.height as f64 - monitor.y as f64)
+        .clamp(visible_top_px, monitor.height as f64);
+    let top = bounded_top_offset(top_offset, visible_top_px / scale, visible_bottom_px / scale);
+    // Round the canvas anchor once, independently of the current shape. At
+    // fractional DPI, floor the last safe top pixel to avoid crossing the taskbar.
+    let minimum = visible_top_px.ceil() as i32;
+    let maximum = (visible_bottom_px - DIAL * scale).floor().max(minimum as f64) as i32;
+    let top_px = ((top * scale).round() as i32).clamp(minimum, maximum);
+    let inset_px = (((EFFECT - DIAL) / 2.0) * scale).round() as i32;
+    (x, monitor.y + top_px - inset_px)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,13 +158,18 @@ fn monitor_rect(window: &Window, fallback_w: u32, fallback_h: u32) -> ScreenRect
 /// Keep the native/WebView backing viewport at 580 logical pixels for every
 /// shape. Resizing occurs only when monitor geometry or DPI actually changes;
 /// the visible/input region changes without moving or rebuilding that surface.
-pub fn resize_to(window: &Window, shape: IslandShape) -> bool {
+pub fn resize_to(window: &Window, shape: IslandShape, top_offset: f64) -> bool {
     #[cfg(target_os = "macos")]
-    { macos::resize_to(window, shape) }
+    { macos::resize_to(window, shape, top_offset) }
     #[cfg(not(target_os = "macos"))]
     {
     let rect = monitor_rect(window, 1920, 1080);
     let scale = window.scale_factor();
+    if !scale.is_finite() || scale <= 0.0 { return false; }
+    #[cfg(target_os = "windows")]
+    let work_area = native::work_area(window).unwrap_or(rect);
+    #[cfg(not(target_os = "windows"))]
+    let work_area = rect;
     let desired_inner = LogicalSize::new(EFFECT, EFFECT).to_physical::<u32>(scale);
     let current_inner = window.inner_size();
     let current_outer = window.outer_size();
@@ -148,8 +177,8 @@ pub fn resize_to(window: &Window, shape: IslandShape) -> bool {
         desired_inner.width + current_outer.width.saturating_sub(current_inner.width),
         desired_inner.height + current_outer.height.saturating_sub(current_inner.height),
     );
-    let (x, y) = island_position(rect.width, desired_outer.width, scale);
-    let position = PhysicalPosition::new(rect.x + x, rect.y + y);
+    let (x, y) = island_position(rect, work_area, desired_outer.width, scale, top_offset);
+    let position = PhysicalPosition::new(x, y);
     let geometry_changed = current_inner != desired_inner || window.outer_position().ok() != Some(position);
     #[cfg(target_os = "windows")]
     {
@@ -658,18 +687,75 @@ mod tests {
         assert_eq!(panel_position_in(area, 900, 620, None), (-800, 50));
     }
     #[test]
-    fn stable_viewport_keeps_all_visible_shapes_at_the_top_anchor_across_dpi() {
+    fn requested_top_offset_is_bounded_for_the_expanded_dial() {
+        for (requested, expected) in [(0.0, 0.0), (20.0, 20.0), (1000.0, 700.0)] {
+            assert_eq!(bounded_top_offset(requested, 0.0, 1040.0), expected);
+        }
+        // A screen shorter than the dial keeps its top visible rather than
+        // introducing a negative offset. macOS uses these same logical bounds.
+        for height in [0.0, 200.0, 339.0, 340.0] {
+            for requested in [0.0, 20.0, 1000.0] {
+                assert_eq!(bounded_top_offset(requested, 0.0, height), 0.0);
+            }
+        }
+        assert_eq!(bounded_top_offset(20.0, 40.0, 1040.0), 40.0);
+        assert_eq!(bounded_top_offset(1000.0, 40.0, 300.0), 40.0);
+        assert_eq!(bounded_top_offset(-10.0, 0.0, 1040.0), 0.0);
+        assert_eq!(bounded_top_offset(f64::NAN, 0.0, 1040.0), 20.0);
+        assert_eq!(bounded_top_offset(2000.0, 0.0, 2000.0), 1000.0);
+    }
+
+    #[test]
+    fn stable_viewport_keeps_all_shapes_at_the_configured_anchor_across_dpi() {
         for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
             let canvas = LogicalSize::new(EFFECT, EFFECT).to_physical::<u32>(scale);
-            let (x, y) = island_position(1920, canvas.width, scale);
-            assert!((x * 2 + canvas.width as i32 - 1920).abs() <= 1);
-            assert_eq!(y + (120.0 * scale).round() as i32, (TOP_OFFSET * scale).round() as i32);
-            for shape in [IslandShape::Pill, IslandShape::Dial] {
-                let region = island_region(shape, scale).unwrap();
-                assert_eq!(region.left + region.right, canvas.width as i32);
-                let padding = (SHADOW_EXTENT * scale).ceil() as i32 + REGION_AA_GUARD;
-                assert_eq!(y + region.top + padding, (TOP_OFFSET * scale).round() as i32);
+            let monitor = ScreenRect { x: -2560, y: -200,
+                width: (1920.0 * scale) as u32, height: (1080.0 * scale) as u32 };
+            let work_area = ScreenRect { height: (1040.0 * scale) as u32, ..monitor };
+            for requested in [0.0_f64, 20.0, 1000.0] {
+                let (x, y) = island_position(monitor, work_area, canvas.width, scale, requested);
+                let expected_top = monitor.y + (requested.min(700.0) * scale).round() as i32;
+                assert!(((x - monitor.x) * 2 + canvas.width as i32 - monitor.width as i32).abs() <= 1);
+                // The effect canvas has this same origin; only the clip region changes.
+                assert_eq!(y + (120.0 * scale).round() as i32, expected_top);
+                assert!(expected_top as f64 + DIAL * scale
+                    <= work_area.y as f64 + work_area.height as f64);
+                for shape in [IslandShape::Pill, IslandShape::Dial] {
+                    let region = island_region(shape, scale).unwrap();
+                    assert_eq!(region.left + region.right, canvas.width as i32);
+                    let padding = (SHADOW_EXTENT * scale).ceil() as i32 + REGION_AA_GUARD;
+                    assert_eq!(y + region.top + padding, expected_top);
+                }
             }
+        }
+    }
+
+    #[test]
+    fn top_taskbar_and_tiny_monitor_keep_the_visible_anchor_on_screen() {
+        let monitor = ScreenRect { x: -1280, y: 300, width: 1280, height: 800 };
+        let top_taskbar = ScreenRect { y: 340, height: 760, ..monitor };
+        for requested in [0.0, 20.0] {
+            let (_, y) = island_position(monitor, top_taskbar, 580, 1.0, requested);
+            assert_eq!(y + 120, 340);
+        }
+        let tiny = ScreenRect { height: 300, ..monitor };
+        for requested in [0.0, 20.0, 1000.0] {
+            let (_, y) = island_position(tiny, tiny, 580, 1.0, requested);
+            assert_eq!(y + 120, tiny.y);
+        }
+    }
+
+    #[test]
+    fn fractional_dpi_rounding_does_not_push_dial_into_bottom_taskbar() {
+        for scale in [1.0625, 1.1, 1.3333333333333333] {
+            let monitor = ScreenRect { x: -3000, y: -125, width: 1920, height: 1080 };
+            let work_area = ScreenRect { height: 1039, ..monitor };
+            let canvas = LogicalSize::new(EFFECT, EFFECT).to_physical::<u32>(scale);
+            let (_, y) = island_position(monitor, work_area, canvas.width, scale, 1000.0);
+            let visible_top = y + (120.0 * scale).round() as i32;
+            assert!(visible_top >= monitor.y);
+            assert!(visible_top as f64 + DIAL * scale
+                <= work_area.y as f64 + work_area.height as f64);
         }
     }
 }

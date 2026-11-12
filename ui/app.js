@@ -24,7 +24,7 @@
   const defaults = {
     tasks: [{id:'t1',name:'深度工作',sec:1500},{id:'t2',name:'阅读论文',sec:2700},{id:'t3',name:'代码评审',sec:900}],
     current_id:'t1', duration_sec:1500,
-    settings:{showHands:true,showSecond:true,showIdleClock:true,showIdleEyes:false,sound:true,notify:false,alwaysOnTop:true,reduceMotion:false}
+    settings:{showHands:true,showSecond:true,showIdleClock:true,showIdleEyes:false,sound:true,notify:false,alwaysOnTop:true,reduceMotion:false,topOffset:20}
   };
   let S = {...defaults, ...window.__STATE__};
   S.settings = {...defaults.settings, ...S.settings};
@@ -36,6 +36,7 @@
   let lastTimerMessage = '', closeTimer = null, effectTimer = null, effectActive = false;
   let effectGeneration = 0, selftesting = false, durationDraftDirty = false;
   let runId = '', runTaskId = '', runTaskName = '', runSequence = 0;
+  let topOffsetDraftDirty = false;
   let actionDraftScope = null, actionDraftRevision = 0;
   const actionDrafts = new Map(), actionPending = new Map();
   let actionStatus = {phase:'idle',runId:''};
@@ -48,6 +49,7 @@
     'handHour','handMinute','handSecond','ticks','hourMarks','fx','btnToggle','btnReset',
     'taskList','presets','inH','inM','inS','durNote','inTaskName','inTaskMin','inTaskSec','taskNote',
     'swHands','swSecond','swIdleClock','swEyes','swSound','swNotify','swTop','swMotion',
+    'inTopOffset','btnApplyTopOffset','topOffsetNote',
     'btnClose','btnStart','btnReset2','btnClear','btnAddTask','btnApplyCustom','expanded',
     'actionScope','actionEnabled','actionKind','actionCommand','actionCommandField','actionDelay','btnSaveAction','actionConfigNote',
     'islandAction','panelAction','btnCancelIslandAction','btnCancelPanelAction',
@@ -444,6 +446,8 @@
       swNotify:'notify',swTop:'alwaysOnTop',swMotion:'reduceMotion'
     })) el[id].checked = !!S.settings[key];
     el.swSecond.disabled = !S.settings.showHands;
+    // Position and duration edits are independent of unrelated state broadcasts.
+    if (!topOffsetDraftDirty) el.inTopOffset.value = S.settings.topOffset;
     renderTasks();reconcileTaskEditors();renderActionConfig();renderActionStatus();
   }
   function renderAll() {
@@ -890,6 +894,26 @@
       const sec = values[0]*3600+values[1]*60+values[2];
       if (!sec) return showError(el.durNote,'请输入大于 0 的时长');
       durationDraftDirty=false; send({type:'setDuration',sec});
+    });
+    el.inTopOffset.addEventListener('input',()=>{
+      topOffsetDraftDirty=true;
+      el.inTopOffset.setAttribute('aria-invalid','false');
+      el.topOffsetNote.classList.remove('is-error');
+      el.topOffsetNote.textContent='默认 20 px，超出屏幕时自动贴合可用区域。';
+    });
+    el.btnApplyTopOffset.addEventListener('click',()=>{
+      const value=inputValue(el.inTopOffset);
+      if (value===null) return showError(el.topOffsetNote,'请输入 0–1000 的整数像素值');
+      S.settings.topOffset=value;topOffsetDraftDirty=false;
+      el.inTopOffset.value=value;
+      el.topOffsetNote.classList.remove('is-error');
+      el.topOffsetNote.textContent='已应用 '+value+' px；超出屏幕时自动贴合可用区域。';
+      send({type:'updateSettings',settings:{...S.settings}});
+    });
+    el.inTopOffset.addEventListener('keydown',e=>{
+      if (e.key==='Enter' && !e.isComposing && !e.repeat) {
+        e.preventDefault();el.btnApplyTopOffset.click();
+      }
     });
     el.btnOpenTaskPage.addEventListener('click',()=>setTaskPage(true));
     el.btnTaskBack.addEventListener('click',()=>setTaskPage(false));

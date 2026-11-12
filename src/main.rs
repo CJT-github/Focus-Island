@@ -340,7 +340,7 @@ fn main() {
         .with_inner_size(window::logical_size(window::EFFECT, window::EFFECT))
         .build(&event_loop).expect("创建灵动岛窗口失败");
     window::configure_overlay(&island);
-    window::resize_to(&island, window::IslandShape::Pill);
+    window::resize_to(&island, window::IslandShape::Pill, f64::from(app_state.settings.top_offset));
     let panel = overlay_builder()
         .with_title("Focus Island 设置")
         .with_always_on_top(app_state.settings.always_on_top).with_visible(false)
@@ -428,7 +428,7 @@ fn main() {
             }
             Event::WindowEvent { event: WindowEvent::ScaleFactorChanged { .. }, window_id, .. } => {
                 if window_id == island.id() {
-                    window::resize_to(&island, if effect { window::IslandShape::Effect } else if island_open { window::IslandShape::Dial } else { window::IslandShape::Pill });
+                    window::resize_to(&island, if effect { window::IslandShape::Effect } else if island_open { window::IslandShape::Dial } else { window::IslandShape::Pill }, f64::from(app_state.settings.top_offset));
                     window::fit_webview(&island_webview, &island);
                 } else if window_id == panel.id() {
                     window::keep_panel_visible(&panel);
@@ -477,7 +477,7 @@ fn main() {
                 }
                 Command::SetShape(open, request_id) => {
                     island_open = open;
-                    let resized = window::resize_to(&island, if effect { window::IslandShape::Effect } else if open { window::IslandShape::Dial } else { window::IslandShape::Pill });
+                    let resized = window::resize_to(&island, if effect { window::IslandShape::Effect } else if open { window::IslandShape::Dial } else { window::IslandShape::Pill }, f64::from(app_state.settings.top_offset));
                     if resized && window::fit_webview(&island_webview, &island) {
                         acknowledge_viewport(&island_webview, request_id);
                     } else {
@@ -494,7 +494,7 @@ fn main() {
                     // Widen the native region for fragments without resizing the
                     // stable WebView surface or moving its screen-space origin.
                     island_open = true;
-                    let resized = window::resize_to(&island, if active { window::IslandShape::Effect } else { window::IslandShape::Dial });
+                    let resized = window::resize_to(&island, if active { window::IslandShape::Effect } else { window::IslandShape::Dial }, f64::from(app_state.settings.top_offset));
                     if resized && window::fit_webview(&island_webview, &island) {
                         acknowledge_viewport(&island_webview, request_id);
                     } else {
@@ -555,7 +555,18 @@ fn main() {
                     changed = true; reset = true;
                 }
                 Command::UpdateSettings(settings) => {
+                    let top_offset_changed = app_state.settings.top_offset != settings.top_offset;
                     app_state.settings = settings;
+                    if top_offset_changed {
+                        let shape = if effect { window::IslandShape::Effect }
+                            else if island_open { window::IslandShape::Dial } else { window::IslandShape::Pill };
+                        if !window::resize_to(&island, shape, f64::from(app_state.settings.top_offset)) {
+                            log("TopOffset: 窗口位置调整失败");
+                        }
+                        window::fit_webview(&island_webview, &island);
+                        if verbose { log(&format!("TopOffset ACK: requested={} position={:?}",
+                            app_state.settings.top_offset, island.outer_position())); }
+                    }
                     if !cursor_watch_allowed(&app_state.settings, island.is_visible(), island_open, effect) {
                         cursor_watch.set_enabled(false, Instant::now());
                     }
