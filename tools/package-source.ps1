@@ -54,7 +54,7 @@ function Get-SafeTreeFiles([string]$Root) {
 function Get-PackageFiles {
     # Explicit allowlist. No repository-wide recursion, build outputs, profile
     # data, verification artifacts, screenshots, logs or local toolchain caches.
-    foreach ($name in @('Cargo.toml', 'Cargo.lock', 'README.md', 'PACKAGING.txt', '.gitignore')) {
+    foreach ($name in @('Cargo.toml', 'Cargo.lock', 'README.md', 'PACKAGING.txt', 'PROMPT.md', '.gitignore')) {
         $path = Assert-SourcePath (Join-Path $projectRoot $name)
         $item = Assert-NoReparse $path
         if ($item.PSIsContainer) { throw "Expected a source file: $path" }

@@ -1,12 +1,12 @@
 # Focus Island · 桌面灵动岛倒计时
 
-透明无边框专注计时器，使用 Rust + tao + wry。Windows 使用 WebView2，已有本机验证的便携包；macOS 使用 WKWebView，平台适配源码和云端打包流程已加入，尚待 macOS 构建与实机验收。界面、脚本、托盘图标均内置。
+透明无边框专注计时器，使用 Rust + tao + wry。Windows 使用 WebView2，已有本机验证的便携包；macOS 使用 WKWebView，Apple Silicon 与 Intel 包已完成一次云端构建和 GUI 自检，尚需人工实机验收。界面、脚本、托盘图标均内置。
 
 ## 运行
 
 双击 **dist/FocusIsland.exe**。系统需已有 Microsoft Edge WebView2 Runtime；发布包不包含该系统运行时。
 
-- 收起态为屏幕水平居中、距离顶部约 20px 的 132×38 药丸，有选中任务或已开始计时时优先显示倒计时和进度环。无任务待机可显示时分秒或恶魔之眼；两项都开启时每 10 秒轮换，只开启一项时持续显示该项。
+- 收起态为屏幕水平居中、顶部距离可设为 0–1000 px（默认 20 px）的 132×38 药丸，有选中任务或已开始计时时优先显示倒计时和进度环。无任务待机可显示时分秒或恶魔之眼；两项都开启时每 10 秒轮换，只开启一项时持续显示该项。
 - 点击展开为 340×340 圆盘：真实时钟、金色倒计时环、数字电子窗、播放/暂停和重置。
 - 右键打开右下角的独立设置浮窗，按住顶部标题区可拖动，关闭再打开保留本次位置；支持预设、时/分/秒输入、任务增删切换、显示、待机与提醒偏好。任务列表旁的「新增任务」进入独立页面，可一次填写名称、时长和结束动作；返回保留完整草稿，创建成功后返回并选中新任务。
 - 倒计时归零时左右半盘沿互补锯齿分离，伴随白光、光束、金色火花与冲击波；约 1.5 秒后显示绿色完成态。
@@ -49,11 +49,11 @@ powershell -ExecutionPolicy Bypass -File .\tools\package-windows.ps1
 powershell -ExecutionPolicy Bypass -File .\tools\package-windows.ps1 -SkipBuild
 ~~~
 
-macOS 的窗口、菜单、通知、数据目录和命令类型已按平台适配。`.github/workflows/package.yml` 分别使用 Apple Silicon 和 Intel macOS runner 构建 ZIP/DMG，构建失败或 GUI 自检失败不会输出 Mac 包；本次尚未在 macOS 上构建或实机验收。Mac 包默认采用 ad-hoc 签名，未公证。完整上传、打包及平台差异说明见 [PACKAGING.txt](PACKAGING.txt)。
+macOS 的窗口、菜单、通知、数据目录和命令类型已按平台适配。`.github/workflows/package.yml` 分别使用 Apple Silicon 和 Intel macOS runner 构建 ZIP/DMG，构建失败或 GUI 自检失败不会输出 Mac 包。此前提交 `a4c5885` 的两个 Mac 构建及 GUI 自检已通过；本轮顶部距离改动的云端验证待运行。Mac 包默认采用 ad-hoc 签名，未公证。完整上传、打包及平台差异说明见 [PACKAGING.txt](PACKAGING.txt)。
 
-工程包由 `tools/package-source.ps1` 生成，只包含源码、锁定依赖清单、测试/构建脚本和说明，不包含编译缓存、测试数据、用户配置或登录凭据。
+工程包由 `tools/package-source.ps1` 生成，只包含源码、锁定依赖清单、测试/构建脚本和说明，不包含编译缓存、测试数据、用户配置或登录凭据。Actions 新增 `FocusIsland-source` 产物，内含工程 ZIP 和 SHA256 校验文件；平台产物名称保持 `FocusIsland-windows-x64`、`FocusIsland-macos-arm64`、`FocusIsland-macos-x86_64`。
 
-在设置的“显示与提醒”中调整“距顶部”，支持 0–1000 px，默认 20 px。点击“应用”或按 Enter 后立即移动，重启保留；超出屏幕可用区域时自动限制位置，展开、收起与计时状态不受影响。Windows 按屏幕顶部计距，Mac 按菜单栏下方的可用区域顶部计距。
+在设置的“显示与提醒”中调整“距顶部”，支持 0–1000 px，默认 20 px。点击“应用”或按 Enter 后立即移动，重启保留；超出屏幕可用区域时自动限制位置，展开、收起与计时状态不受影响。Windows 按所在显示器顶部计距，并按工作区上下边界限制位置，为展开圆盘保留空间；Mac 按菜单栏下方的可用区域顶部计距。保存的是用户设定值，屏幕边界只约束实际位置。
 
 ## 自检与回归
 
@@ -118,7 +118,7 @@ node .\tools\verify-idle-eyes.cjs --native .\dist\FocusIsland.exe
 
 ### 顶部玻璃样式更新
 
-药丸和展开圆盘均保持水平居中，距屏幕顶部 20 个逻辑像素（随 DPI 缩放）。向下展开和收起时保持顶部锚点；特效窗口用透明留白补偿，圆盘位置不跳动。岛体取消白色描边与硬边高光，改为透色深玻璃和柔和反光；Windows 11 的系统边框也显式禁用。
+药丸和展开圆盘均保持水平居中，顶部距离默认 20 个逻辑像素（随 DPI 缩放），可在设置中调整为 0–1000。向下展开和收起时保持顶部锚点；特效窗口用透明留白补偿，圆盘位置不跳动。岛体取消白色描边与硬边高光，改为透色深玻璃和柔和反光；Windows 11 的系统边框也显式禁用。
 
 透明窗口使用 `WS_EX_NOREDIRECTIONBITMAP`，避免圆角外出现 Windows 白色底图；桌面实拍验证见 `tools/verify/native-pill-desktop.png` 和 `native-dial-desktop.png`。
 
@@ -194,6 +194,8 @@ node .\tools\verify-idle-eyes.cjs --native .\dist\FocusIsland.exe
 
 Windows 与 macOS 共用任务、计时、玻璃界面和完成动作状态机。平台层分别处理窗口透明、点击穿透、托盘/菜单栏、通知和数据目录。新建 Mac 任务默认使用 Shell（zsh），旧 PowerShell 配置保持解释器身份并拒绝在 Mac 上重解释；Mac 菜单提供 Shell、睡眠、关机、重启，现代 macOS 暂不提供锁屏动作。
 
-Windows 本轮 54 项 Rust 测试通过；普通前端 8 组、包含 Mac 平台选择的动作前端 14 组、原生动作 18 组通过，独立配置 GUI 自检通过。Apple Silicon 和 Intel 均通过 Windows 主机上的 Rust 类型检查（含 tests）；检查使用依赖支持的 `DOCS_RS=1` 跳过仅供链接的 Objective-C exception helper，未进行 Mac 原生链接或运行。Mac 打包布局、plist、工作流和超时处理已做静态/模拟验证，仍须在 macOS runner 实际构建和执行 GUI 自检。
+此前提交 `a4c5885` 的 [GitHub Actions 运行 43007195870](https://github.com/CJT-github/Focus-Island/actions/runs/43007195870) 三个平台任务均成功；Mac arm64、x86_64 各通过 50 项 Rust 测试及独立配置 GUI 自检，并生成 ZIP/DMG。Mac 包采用 ad-hoc 签名，未公证；云端自检不代替鼠标穿透、多屏、权限提示与动画的人工实机验收。
 
-GitHub 工作流提供 Windows x64、macOS arm64 和 macOS x86_64 三个独立构建任务，只上传打包产物，不发布 Release。Mac 使用 ad-hoc 签名，未做 Apple 公证。源码工程 ZIP 采用明确文件清单并逐项对比哈希；上传步骤见 PACKAGING.txt。
+本轮顶部距离改动在 Windows 上通过 60 项 Rust 测试、9 组前端回归和 6 组原生位置验证。Mac 两架构仅完成 Windows 主机上的 Rust 类型检查（含 tests，使用 `DOCS_RS=1` 跳过 Objective-C 链接辅助代码）；本轮 CI 待运行，尚不能据此宣称最新改动已在 Mac 构建或运行。
+
+GitHub 工作流提供 Windows x64、macOS arm64 和 macOS x86_64 三个平台构建任务，并额外上传 `FocusIsland-source` 工程 ZIP 与 SHA256，只提供 Actions 产物，不发布 Release。Mac 使用 ad-hoc 签名，未做 Apple 公证。源码工程 ZIP 采用明确文件清单并逐项对比哈希；上传步骤见 PACKAGING.txt。

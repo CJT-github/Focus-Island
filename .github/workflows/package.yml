@@ -8,8 +8,12 @@ on:
       - 'Cargo.lock'
       - 'src/**'
       - 'ui/**'
-      - 'tools/package-windows.ps1'
-      - 'tools/package-macos.py'
+      - 'tools/**'
+      - 'README.md'
+      - 'PACKAGING.txt'
+      - 'PROMPT.md'
+      - '.gitignore'
+      - 'tray-icon.png'
       - '.github/workflows/package.yml'
 
 # No pull_request / pull_request_target trigger and no release or repository writes.
@@ -44,6 +48,19 @@ jobs:
       - name: Package Windows
         shell: pwsh
         run: ./tools/package-windows.ps1
+      - name: Package source project
+        shell: pwsh
+        run: ./tools/package-source.ps1
+      - name: Upload source project
+        uses: actions/upload-artifact@v7
+        with:
+          name: FocusIsland-source
+          path: |
+            dist/FocusIsland-*-source.zip
+            dist/FocusIsland-*-source.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
       - name: Upload Windows packages
         uses: actions/upload-artifact@v7
         with:
