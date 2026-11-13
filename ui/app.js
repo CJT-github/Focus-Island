@@ -26,7 +26,44 @@
     current_id:'t1', duration_sec:1500,
     settings:{showHands:true,showSecond:true,showIdleClock:true,showIdleEyes:false,sound:true,notify:false,alwaysOnTop:true,reduceMotion:false,topOffset:20}
   };
+
+  const notificationDefaults={enabled:true,displaySeconds:5,listLimit:5};
+  function normalizedNotifications(value={}) {
+    return {enabled:typeof value.enabled==='boolean'?value.enabled:true,
+      displaySeconds:Number.isInteger(value.displaySeconds)&&value.displaySeconds>=1&&value.displaySeconds<=30?value.displaySeconds:5,
+      listLimit:Number.isInteger(value.listLimit)&&value.listLimit>=1&&value.listLimit<=10?value.listLimit:5};
+  }
+  const webhookDefaults={enabled:false,scope:'local',port:17891,publicBaseUrl:''};
+  function publicWebhookOrigin(value) {
+    if(typeof value!=='string' || !value.trim())return '';
+    const raw=value.trim();
+    if(new TextEncoder().encode(raw).length>2048 || /[\u0000-\u001f\u007f-\u009f\\?#]/.test(raw) || !/^https:\/\//i.test(raw))return null;
+    const authority=raw.slice(8).replace(/\/$/,'');
+    if(!authority || /[\/@]/.test(authority) || authority.endsWith(':'))return null;
+    try{
+      const url=new URL(raw),host=url.hostname.replace(/\.$/,'');
+      if(!url.hostname.startsWith('[') && (host.length>253 || host.split('.').some(label=>!label||label.length>63||!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label))))return null;
+      if(url.protocol==='https:' && !url.username && !url.password && !url.search && !url.hash && url.pathname==='/' && url.port!=='0')return url.origin;
+    }catch{}
+    return null;
+  }
+  function normalizedWebhook(value={}) {
+    return {enabled:value.enabled===true,scope:value.scope==='lan'?'lan':'local',
+      port:Number.isInteger(value.port)&&value.port>=1024&&value.port<=65535?value.port:webhookDefaults.port,
+      publicBaseUrl:publicWebhookOrigin(value.publicBaseUrl) || ''};
+  }
+
+  function normalizedRelay(value={}) {return {enabled:value.enabled===true,serviceUrl:publicWebhookOrigin(value.serviceUrl)||''};}
+  const phoneDefaults={enabled:false,displaySeconds:8,hideContent:false,deviceAddress:'',deviceName:''};
+  function normalizedPhone(value={}) {
+    return {enabled:!!value.enabled,displaySeconds:Number.isInteger(value.displaySeconds)&&value.displaySeconds>=3&&value.displaySeconds<=30?value.displaySeconds:8,
+      hideContent:!!value.hideContent,deviceAddress:typeof value.deviceAddress==='string'?value.deviceAddress:'',deviceName:typeof value.deviceName==='string'?value.deviceName:''};
+  }
   let S = {...defaults, ...window.__STATE__};
+  S.phone=normalizedPhone({...phoneDefaults,...S.phone});
+  S.notifications=normalizedNotifications(S.notifications);
+  S.webhook=normalizedWebhook(S.webhook);
+  S.relay=normalizedRelay(S.relay);
   S.settings = {...defaults.settings, ...S.settings};
   const MAX_SEC = 359999;
   const duration = value => Math.min(MAX_SEC, Math.max(1, Math.trunc(Number(value) || 1500)));
@@ -43,9 +80,19 @@
   let actionDraftScope = null, actionDraftRevision = 0;
   const actionDrafts = new Map(), actionPending = new Map();
   let actionStatus = {phase:'idle',runId:''};
-  let panelPage = 'settings', editingTaskId = '', settingsReturnTaskId = '', settingsScrollTop = 0, pendingTaskCreate = null;
+  let panelPage = 'timer', editingTaskId = '', settingsReturnTaskId = '', pendingTaskCreate = null;
+  const panelScrollPositions = new Map();
+  let panelNavigationRevision = 0;
   let taskCreateSequence = Date.now(), activeKindEditor = null;
   let kindMenuOpen = false, kindMenuIndex = 0, kindMenuTimer = null, kindMenuFrame = null;
+  let phoneStatus={supported:platform==='macos'?false:null,phase:platform==='macos'?'unsupported':'idle',message:'',devices:[]};
+  let phoneConfigPending=null;
+  let webhookConfigPending=null,webhookTestPending=null,webhookDraftDirty=false,webhookDraftScope=S.webhook.scope;
+  let webhookSequence=Date.now(),webhookToken='',webhookTokenVisible=false,webhookEndpointVisible=false;
+  let webhookStatus={phase:'disabled',message:'',endpoint:'',lanAddresses:[],acceptedCount:0,lastReceivedAt:null};
+  let relayConfigPending=null,relayDraftDirty=false,relayHasConnectionKey=window.__STATE__?.relay?.hasConnectionKey===true,relayWebhookToken='',relayTokenOrigin='',relayTokenRevision=null,relayTokenQueried=false,relayEndpointVisible=false;
+  let relayStatus={phase:'disabled',message:'',acceptedCount:0,lastReceivedAt:null};
+  let notificationCenter=null,noticeViewportPending=null,notificationsConfigPending=null,notificationsDraftDirty=false;
 
   const el = Object.fromEntries([
     'island','compactTime','idleEyes','readoutTask','readoutDigits','readoutChip','miniRing','dialProgress',
@@ -56,12 +103,33 @@
     'btnClose','btnStart','btnReset2','btnClear','btnAddTask','btnApplyCustom','expanded',
     'actionScope','actionEnabled','actionKind','actionCommand','actionCommandField','actionDelay','btnSaveAction','actionConfigNote',
     'panelAction','btnCancelPanelAction',
+    'panelNav','preferencesPage','btnOpenTimerPage','btnOpenPreferencesPage','timerNavStatus','phoneNavStatus',
     'settingsPage','taskCreatePage','taskSettingsPage','taskSettingsDuration','btnOpenTaskPage','btnTaskBack','btnCancelTask','panelTitle',
     'actionKindTrigger','actionKindValue','actionKindMenu',
     'editTaskMin','editTaskSec','btnSaveTaskDuration','taskDurationNote',
     'createActionEnabled','createActionKind','createActionCommand','createActionCommandField','createActionDelay',
-    'createActionKindTrigger','createActionKindValue'
+    'createActionKindTrigger','createActionKindValue',
+    'phonePage','btnOpenPhonePage','phoneEnabled','phoneHideContent','phoneConfigNote',
+    'btnPhoneScan','phoneDevices','btnPhoneDisconnect','phoneStatus','phoneSupportNote','phoneAccessNote',
+    'notificationsSettings','notificationsEnabled',
+    'notificationDisplaySeconds','notificationListLimit','btnSaveNotifications','notificationsConfigNote','btnTestNotification','btnPhoneNotificationSettings',
+    'webhookPage','btnOpenWebhookPage','webhookNavStatus','webhookEnabled','webhookPort','webhookScopeLocal','webhookScopeLan',
+    'webhookPublicBaseUrl','webhookPublicNote','btnRevealWebhookEndpoint','webhookScopeNote','webhookPhase','webhookStatusText','webhookActivity','webhookEndpoint','btnCopyWebhookEndpoint','webhookToken',
+    'btnRevealWebhookToken','btnCopyWebhookToken','btnRotateWebhookToken','btnSaveWebhook','webhookConfigNote','btnTestWebhook',
+    'relayEnabled','relayServiceUrl','relayConnectionKey','relayKeyNote','btnSaveRelay','relayConfigNote','relayPhase','relayStatusText','relayActivity','relayEndpoint','btnRevealRelayEndpoint','btnCopyRelayEndpoint','relayCopyNote',
+    'webhookCopyNote','webhookTestNote','webhookCurlExample','webhookPowerShellExample','webhookLanAddresses','webhookNotificationNote','btnWebhookNotifications'
   ].map(id => [id, $('#'+id)]));
+
+  // Register features once; child pages inherit their feature's menu item.
+  const panelRoutes = {
+    timer:{element:'settingsPage',title:'倒计时',menu:'btnOpenTimerPage'},
+    webhook:{element:'webhookPage',title:'Webhook',menu:'btnOpenWebhookPage'},
+    phone:{element:'phonePage',title:'手机通知',menu:'btnOpenPhonePage'},
+    preferences:{element:'preferencesPage',title:'通用设置',menu:'btnOpenPreferencesPage'},
+    create:{element:'taskCreatePage',title:'新增任务',parent:'timer'},
+    task:{element:'taskSettingsPage',title:'任务设置',parent:'timer'}
+  };
+  const panelRoot = page => panelRoutes[page].parent || page;
 
   const currentTask = () => S.tasks.find(t => t.id === S.current_id);
   // A saved selection chooses the next task; only a started timer occupies the island.
@@ -85,6 +153,394 @@
   }
   const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
   const reducedMotion = () => S.settings.reduceMotion || motionPreference.matches;
+
+  const phoneText=(value,max)=>typeof value==='string'?value.slice(0,max):'';
+
+  function reconcileNotifications() {
+    if(isPanel)return;
+    notificationCenter?.configure(S.notifications);
+    if(!S.phone.enabled || phoneStatus.supported===false || phoneStatus.notificationAccess===false)notificationCenter?.clearSource('phone');
+    else if(S.phone.hideContent)notificationCenter?.redactSource('phone');
+  }
+  function renderNotificationsPanel() {
+    if(!isPanel)return;
+    if(!notificationsDraftDirty && !notificationsConfigPending){
+      el.notificationsEnabled.checked=S.notifications.enabled;
+      el.notificationDisplaySeconds.value=S.notifications.displaySeconds;
+      el.notificationListLimit.value=S.notifications.listLimit;
+    }
+    for(const node of [el.notificationsEnabled,el.notificationDisplaySeconds,el.notificationListLimit,el.btnSaveNotifications])node.disabled=!!notificationsConfigPending;
+    el.btnTestNotification.disabled=!S.notifications.enabled || !!notificationsConfigPending;
+  }
+  function saveNotificationsConfig() {
+    if(!isPanel || notificationsConfigPending)return;
+    const displaySeconds=inputValue(el.notificationDisplaySeconds),listLimit=inputValue(el.notificationListLimit);
+    if(displaySeconds===null)return showError(el.notificationsConfigNote,'停留时间请输入 1–30 之间的整数秒');
+    if(listLimit===null)return showError(el.notificationsConfigNote,'列表数量请输入 1–10 之间的整数');
+    const settings={enabled:el.notificationsEnabled.checked,displaySeconds,listLimit};
+    notificationsConfigPending={settings};notificationsDraftDirty=true;renderNotificationsPanel();
+    el.notificationsConfigNote.textContent='正在保存…';el.notificationsConfigNote.classList.remove('is-error');
+    send({type:'notificationsConfigure',settings});
+  }
+  window.__notificationsConfigResult=payload=>{
+    if(!payload || typeof payload!=='object')return;
+    if(payload.ok) {S.notifications=normalizedNotifications(payload.settings);notificationsDraftDirty=false;}
+    notificationsConfigPending=null;renderNotificationsPanel();reconcileNotifications();
+    if(isPanel){el.notificationsConfigNote.textContent=phoneText(payload.message,500)||(payload.ok?'设置已保存':'保存失败，请重试');el.notificationsConfigNote.classList.toggle('is-error',!payload.ok);}
+  };
+  window.__notificationEvent=payload=>{
+    if(!isPanel)notificationCenter?.receive(payload);
+  };
+  const relayDeliveries=new Set();
+  window.__relayNotification=payload=>{
+    if(isPanel||!S.notifications.enabled||!notificationCenter||!payload||typeof payload!=='object')return false;
+    const validId=value=>typeof value==='string'&&value.length>0&&!/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(value)&&new TextEncoder().encode(value).length<=256;
+    if(!validId(payload.deliveryId))return false;
+    const notification=payload.notification;
+    if(!notification||typeof notification!=='object'||!['posted','removed'].includes(notification.type)||!validId(notification.id))return false;
+    if(['app','title','body'].some(name=>hasOwn(notification,name)&&typeof notification[name]!=='string'))return false;
+    if(notification.type==='posted'&&![notification.title,notification.body].some(value=>typeof value==='string'&&value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g,' ').trim()))return false;
+    if(relayDeliveries.has(payload.deliveryId))return true;
+    try{window.__notificationEvent({...notification,source:'webhook'});}catch{return false;}
+    relayDeliveries.add(payload.deliveryId);
+    while(relayDeliveries.size>200)relayDeliveries.delete(relayDeliveries.values().next().value);
+    return true;
+  };
+  window.__notificationState=()=>notificationCenter?.getState();
+  function webhookText(value,max=500) {
+    return typeof value==='string'?value.replace(/[\u0000-\u001f\u007f-\u009f]/g,' ').slice(0,max):'';
+  }
+  function updateWebhookToken(value) {
+    if(typeof value!=='string')return;
+    webhookToken=/^[A-Za-z0-9_-]{16,256}$/.test(value)?value:'';
+    webhookTokenVisible=false;webhookEndpointVisible=false;
+    el.webhookCopyNote.textContent='';
+  }
+  function relayEndpoint() {
+    return relayStatus.phase==='connected' && S.relay.enabled && S.relay.serviceUrl && relayTokenOrigin===S.relay.serviceUrl && relayWebhookToken?
+      S.relay.serviceUrl+'/api/webhook/'+relayWebhookToken:'';
+  }
+  function renderRelayPanel() {
+    if(!isPanel)return;
+    const busy=!!relayConfigPending;
+    if(!relayDraftDirty&&!busy){el.relayEnabled.checked=S.relay.enabled;el.relayServiceUrl.value=S.relay.serviceUrl;}
+    for(const node of [el.relayEnabled,el.relayServiceUrl,el.relayConnectionKey,el.btnSaveRelay])node.disabled=busy;
+    el.relayConnectionKey.placeholder=relayHasConnectionKey?'已保存；留空继续使用':'粘贴服务器提供的 64 位连接密钥';
+    el.relayKeyNote.textContent=relayHasConnectionKey?'连接密钥已保存；留空表示保留；更换服务地址时，请重新填写对应密钥。':'连接密钥由服务器提供，只用于此程序连接服务器。';
+    const phases={disabled:'未连接',connecting:'正在连接',connected:'已连接',reconnecting:'正在重连',error:'连接失败'};
+    const phase=relayStatus.phase;
+    el.relayPhase.textContent=phases[phase]||'未连接';el.relayPhase.dataset.phase=phase;
+    el.relayStatusText.textContent=relayStatus.message || (phase==='connected'?'服务器连接正常，可将下方专属地址填到外部系统。':phase==='disabled'?'填写服务地址和连接密钥，保存后由程序自动连接。':phase==='error'?'请检查服务器地址和连接密钥后重试。':'正在建立安全连接，请保持程序运行。');
+    const date=new Date(relayStatus.lastReceivedAt||NaN),last=Number.isFinite(date.getTime())?date.toLocaleTimeString('zh-CN',{hour12:false}):'尚未收到';
+    el.relayActivity.textContent='已接收 '+relayStatus.acceptedCount+' 条 · 最近消息 '+last;
+    const endpoint=relayEndpoint();
+    el.relayEndpoint.value=endpoint;el.relayEndpoint.type=relayEndpointVisible?'text':'password';
+    el.btnRevealRelayEndpoint.textContent=relayEndpointVisible?'隐藏':'显示';el.btnRevealRelayEndpoint.setAttribute('aria-pressed',String(relayEndpointVisible));
+    el.btnRevealRelayEndpoint.disabled=busy||!endpoint;el.btnCopyRelayEndpoint.disabled=busy||!endpoint;
+    el.btnSaveRelay.textContent=busy?'正在保存…':el.relayEnabled.checked?'保存并连接':'保存设置';
+    if(S.relay.enabled)el.webhookNavStatus.textContent=phase==='connected'?'服务器已连接':phases[phase]||'正在连接';
+  }
+  function markRelayDraft() {
+    if(relayConfigPending)return;
+    relayDraftDirty=true;
+    el.relayServiceUrl.setAttribute('aria-invalid','false');el.relayConnectionKey.setAttribute('aria-invalid','false');
+    el.relayConfigNote.textContent='尚未保存';el.relayConfigNote.classList.remove('is-error');renderRelayPanel();
+  }
+  function saveRelayConfig() {
+    if(!isPanel||relayConfigPending)return;
+    const enabled=el.relayEnabled.checked,serviceUrl=publicWebhookOrigin(el.relayServiceUrl.value),connectionKey=el.relayConnectionKey.value.trim();
+    const invalidUrl=serviceUrl===null || (enabled&&!serviceUrl);
+    el.relayServiceUrl.setAttribute('aria-invalid',String(invalidUrl));
+    if(invalidUrl)return showError(el.relayConfigNote,'服务地址请输入 HTTPS 域名，可带端口，不要包含路径、查询参数或账号密码');
+    const invalidKey=connectionKey?!/^[0-9a-f]{64}$/i.test(connectionKey):enabled&&(!relayHasConnectionKey||serviceUrl!==S.relay.serviceUrl);
+    el.relayConnectionKey.setAttribute('aria-invalid',String(invalidKey));
+    if(invalidKey)return showError(el.relayConfigNote,'请输入服务器提供的 64 位十六进制连接密钥');
+    const settings={enabled,serviceUrl};if(connectionKey)settings.connectionKey=connectionKey;
+    const requestId=++webhookSequence,pending={requestId,settings:{enabled,serviceUrl},timeout:null};
+    relayConfigPending=pending;relayDraftDirty=true;
+    pending.timeout=setTimeout(()=>{
+      if(relayConfigPending!==pending)return;
+      relayConfigPending=null;showError(el.relayConfigNote,'未收到保存结果，请检查连接状态后重试。');renderRelayPanel();send({type:'relayStatus'});
+    },12000);
+    el.relayConfigNote.textContent='正在保存…';el.relayConfigNote.classList.remove('is-error');renderRelayPanel();
+    send({type:'relayConfigure',settings,requestId});
+  }
+  window.__relayStatus=payload=>{
+    if(!isPanel||!payload||typeof payload!=='object')return;
+    const revision=Number.isSafeInteger(payload.tokenRevision)&&payload.tokenRevision>=0?payload.tokenRevision:null;
+    if(revision!==null && relayTokenRevision!==null && revision<relayTokenRevision)return;
+    if(revision!==null && revision!==relayTokenRevision){
+      relayTokenRevision=revision;relayWebhookToken='';relayTokenOrigin='';relayTokenQueried=false;relayEndpointVisible=false;
+    }
+    const nextPhase=['disabled','connecting','connected','reconnecting','error'].includes(payload.phase)?payload.phase:'disabled';
+    if(nextPhase!=='connected'||relayStatus.phase!=='connected'){relayWebhookToken='';relayTokenOrigin='';relayTokenQueried=false;relayEndpointVisible=false;}
+    if(payload.settings){
+      const settings=normalizedRelay(payload.settings);
+      if(settings.serviceUrl!==S.relay.serviceUrl||(relayTokenOrigin&&settings.serviceUrl!==relayTokenOrigin)||!settings.enabled){relayWebhookToken='';relayTokenOrigin='';relayTokenQueried=false;relayEndpointVisible=false;}
+      S.relay=settings;
+    }
+    if(typeof payload.hasConnectionKey==='boolean')relayHasConnectionKey=payload.hasConnectionKey;
+    if(hasOwn(payload,'webhookToken')){
+      relayWebhookToken=typeof payload.webhookToken==='string'&&/^[0-9a-f]{64}$/i.test(payload.webhookToken)?payload.webhookToken:'';
+      relayTokenOrigin=relayWebhookToken?S.relay.serviceUrl:'';
+      relayEndpointVisible=false;el.relayCopyNote.textContent='';
+    }
+    relayStatus={phase:['disabled','connecting','connected','reconnecting','error'].includes(payload.phase)?payload.phase:'disabled',
+      message:webhookText(payload.message),acceptedCount:Number.isSafeInteger(payload.acceptedCount)&&payload.acceptedCount>=0?payload.acceptedCount:0,
+      lastReceivedAt:typeof payload.lastReceivedAt==='number'||typeof payload.lastReceivedAt==='string'?payload.lastReceivedAt:null};
+    renderWebhookPanel();
+    if(relayStatus.phase==='connected'&&!relayWebhookToken&&!relayTokenQueried){relayTokenQueried=true;send({type:'relayStatus'});}
+  };
+  window.__relayConfigResult=payload=>{
+    if(!isPanel||!payload||!relayConfigPending||payload.requestId!==relayConfigPending.requestId)return;
+    const pending=relayConfigPending;clearTimeout(pending.timeout);relayConfigPending=null;
+    if(payload.ok){
+      const settings=normalizedRelay(payload.settings||pending.settings);
+      if(settings.serviceUrl!==S.relay.serviceUrl||(relayTokenOrigin&&settings.serviceUrl!==relayTokenOrigin)||!settings.enabled){relayWebhookToken='';relayTokenOrigin='';relayTokenQueried=false;relayEndpointVisible=false;}
+      S.relay=settings;relayWebhookToken='';relayTokenOrigin='';relayTokenQueried=false;relayEndpointVisible=false;relayDraftDirty=false;el.relayConnectionKey.value='';
+      if(typeof payload.hasConnectionKey==='boolean')relayHasConnectionKey=payload.hasConnectionKey;
+    }
+    el.relayConfigNote.textContent=webhookText(payload.message)||(payload.ok?'设置已保存，连接状态见上方。':'保存失败，请重试');
+    el.relayConfigNote.classList.toggle('is-error',!payload.ok);renderWebhookPanel();send({type:'relayStatus'});
+  };
+  function webhookBaseEndpoint() {
+    if(S.webhook.publicBaseUrl)return S.webhook.publicBaseUrl+'/api/webhook';
+    const local='http://127.0.0.1:'+S.webhook.port+'/api/webhook';
+    if(S.webhook.scope==='lan' && webhookStatus.lanAddresses.length){
+      const address=webhookStatus.lanAddresses[0];
+      if(/^(?:\d{1,3}\.){3}\d{1,3}$/.test(address) && address.split('.').every(part=>Number(part)<=255))return 'http://'+address+':'+S.webhook.port+'/api/webhook';
+    }
+    try{
+      const url=new URL(webhookStatus.endpoint);
+      if(url.protocol==='http:' && url.hostname==='127.0.0.1' && url.pathname==='/api/webhook' && !url.username && !url.password && !url.search && !url.hash)return url.href;
+    }catch{}
+    return local;
+  }
+  function webhookEndpoint() {return webhookToken?webhookBaseEndpoint()+'/'+webhookToken:'';}
+  function webhookScopeNote() {
+    const scope=webhookDraftDirty?webhookDraftScope:S.webhook.scope;
+    const port=Number(el.webhookPort.value);
+    const changeNeedsRestart=webhookStatus.phase==='listening' && scope!==S.webhook.scope && port===S.webhook.port;
+    const hint=scope==='lan'?'同一局域网的设备可访问；只在信任的网络开启。':'仅此电脑上的应用和脚本可以访问。';
+    return hint+(changeNeedsRestart?' 切换范围前，请先关闭服务并保存，或同时更换端口。':'');
+  }
+  function renderWebhookPanel() {
+    if(!isPanel)return;
+    const busy=!!webhookConfigPending;
+    if(!webhookDraftDirty && !busy){
+      el.webhookEnabled.checked=S.webhook.enabled;
+      el.webhookPort.value=S.webhook.port;
+      el.webhookPublicBaseUrl.value=S.webhook.publicBaseUrl;
+      webhookDraftScope=S.webhook.scope;
+    }
+    for(const node of [el.webhookEnabled,el.webhookPort,el.webhookPublicBaseUrl,el.webhookScopeLocal,el.webhookScopeLan,el.btnSaveWebhook,el.btnRotateWebhookToken])node.disabled=busy;
+    for(const [node,scope] of [[el.webhookScopeLocal,'local'],[el.webhookScopeLan,'lan']]){
+      const selected=webhookDraftScope===scope;
+      node.setAttribute('aria-pressed',String(selected));node.classList.toggle('is-active',selected);
+    }
+    el.webhookScopeNote.textContent=webhookScopeNote();
+    const phases={disabled:'已关闭',listening:'正在接收',error:'启动失败'};
+    const phase=webhookStatus.phase;
+    el.webhookNavStatus.textContent=phases[phase] || '已关闭';
+    el.webhookPhase.textContent=phases[phase] || '已关闭';
+    el.webhookPhase.dataset.phase=phase;
+    el.webhookStatusText.textContent=webhookStatus.message || (phase==='listening'?'外部消息将展示在通知框中。':phase==='error'?'请调整设置后重新保存。':'保存并开启后，即可接收外部消息。');
+    const count=webhookStatus.acceptedCount;
+    const date=new Date(webhookStatus.lastReceivedAt || NaN);
+    const last=Number.isFinite(date.getTime())?date.toLocaleTimeString('zh-CN',{hour12:false}):'尚未收到';
+    el.webhookActivity.textContent='已接收 '+count+' 条 · 最近消息 '+last;
+    const endpoint=webhookEndpoint();
+    el.webhookEndpoint.value=endpoint;
+    el.webhookEndpoint.type=webhookEndpointVisible?'text':'password';
+    el.webhookEndpoint.placeholder='保存设置或生成令牌后获得专属地址';
+    el.btnRevealWebhookEndpoint.textContent=webhookEndpointVisible?'隐藏':'显示';
+    el.btnRevealWebhookEndpoint.setAttribute('aria-pressed',String(webhookEndpointVisible));
+    el.btnRevealWebhookEndpoint.disabled=busy || !webhookToken;
+    el.btnCopyWebhookEndpoint.disabled=busy || !webhookToken;
+    el.webhookPublicNote.textContent=S.webhook.publicBaseUrl?'已填写公网入口；请确认服务器 HTTPS 反向代理与 SSH 反向隧道已连接到本机，并保持程序运行。':'可先用本机地址；公网入口可连接到仅本机监听的服务，填写地址不会自动建立公网连接。';
+    el.webhookLanAddresses.hidden=S.webhook.scope!=='lan';
+    el.webhookLanAddresses.textContent=webhookStatus.lanAddresses.length?
+      '可用局域网 IP：'+webhookStatus.lanAddresses.join('、')+'。其他设备请使用这台电脑的局域网地址。':
+      '未检测到局域网地址；其他设备访问时，请将 127.0.0.1 替换为这台电脑的局域网 IP。';
+    el.webhookToken.type=webhookTokenVisible?'text':'password';
+    el.webhookToken.value=webhookToken;
+    el.webhookToken.placeholder='保存设置或生成令牌后显示';
+    el.btnRevealWebhookToken.textContent=webhookTokenVisible?'隐藏':'显示';
+    el.btnRevealWebhookToken.setAttribute('aria-pressed',String(webhookTokenVisible));
+    el.btnRevealWebhookToken.disabled=busy || !webhookToken;
+    el.btnCopyWebhookToken.disabled=busy || !webhookToken;
+    el.btnRotateWebhookToken.textContent=webhookToken?'重新生成':'生成令牌';
+    el.webhookNotificationNote.hidden=S.notifications.enabled;
+    el.btnTestWebhook.disabled=busy || !!webhookTestPending || phase!=='listening' || !S.notifications.enabled;
+    renderRelayPanel();
+    const json=JSON.stringify({msg_type:'text',content:{text:'部署完成'}});
+    el.webhookCurlExample.textContent="curl -X POST 'YOUR_WEBHOOK_URL' \\\n  -H 'Content-Type: application/json' \\\n  --data-raw '"+json+"'";
+    el.webhookPowerShellExample.textContent="$body = @{ msg_type = 'text'; content = @{ text = '部署完成' } } | ConvertTo-Json\nInvoke-RestMethod -Method Post -Uri 'YOUR_WEBHOOK_URL' -ContentType 'application/json; charset=utf-8' -Body ([System.Text.Encoding]::UTF8.GetBytes($body))";
+  }
+  function markWebhookDraft() {
+    if(webhookConfigPending)return;
+    webhookDraftDirty=true;
+    el.webhookPort.setAttribute('aria-invalid','false');
+    el.webhookPublicBaseUrl.setAttribute('aria-invalid','false');
+    el.webhookConfigNote.textContent='尚未保存';
+    el.webhookConfigNote.classList.remove('is-error');
+    renderWebhookPanel();
+  }
+  function requestWebhookStatus() {
+    if(isPanel){send({type:'webhookStatus'});send({type:'relayStatus'});}
+  }
+  function startWebhookMutation(kind,settings) {
+    const requestId=++webhookSequence;
+    const pending={requestId,kind,settings,timeout:null};
+    webhookConfigPending=pending;
+    pending.timeout=setTimeout(()=>{
+      if(webhookConfigPending!==pending)return;
+      webhookConfigPending=null;
+      showError(el.webhookConfigNote,'未收到保存结果，请检查服务状态后重试。');
+      renderWebhookPanel();requestWebhookStatus();
+    },12000);
+    renderWebhookPanel();
+    el.webhookConfigNote.classList.remove('is-error');
+    el.webhookConfigNote.textContent=kind==='rotate'?'正在生成新令牌…':'正在保存…';
+    send(kind==='rotate'?{type:'webhookRotateToken',requestId}:{type:'webhookConfigure',settings,requestId});
+  }
+  function saveWebhookConfig() {
+    if(!isPanel || webhookConfigPending)return;
+    const port=inputValue(el.webhookPort);
+    if(port===null)return showError(el.webhookConfigNote,'端口请输入 1024–65535 之间的整数');
+    const publicBaseUrl=publicWebhookOrigin(el.webhookPublicBaseUrl.value);
+    el.webhookPublicBaseUrl.setAttribute('aria-invalid',String(publicBaseUrl===null));
+    if(publicBaseUrl===null)return showError(el.webhookConfigNote,'公网入口请输入 HTTPS 域名，可带端口，不要包含路径、查询参数或账号密码');
+    webhookDraftDirty=true;
+    startWebhookMutation('configure',{enabled:el.webhookEnabled.checked,scope:webhookDraftScope,port,publicBaseUrl});
+  }
+  function rotateWebhookToken() {
+    if(!isPanel || webhookConfigPending)return;
+    startWebhookMutation('rotate');
+  }
+  async function copyWebhookValue(value,field,label,note=el.webhookCopyNote) {
+    if(!value)return;
+    let copied=false;
+    try{
+      if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(value);copied=true;}
+    }catch{}
+    if(!copied){
+      const active=document.activeElement,copy=document.createElement('textarea');
+      copy.value=value;copy.readOnly=true;copy.setAttribute('aria-hidden','true');
+      copy.style.cssText='position:fixed;left:-9999px;top:0;opacity:0;';
+      document.body.append(copy);
+      try{copy.select();copied=!!document.execCommand('copy');}catch{}
+      finally{copy.remove();active?.focus?.({preventScroll:true});}
+    }
+    if(!copied && field.type!=='password'){field.focus();field.select();}
+    note.textContent=copied?label+'已复制':label+'无法自动复制，请手动选择复制。';
+    note.classList.toggle('is-error',!copied);
+  }
+  function sendWebhookTest() {
+    if(!isPanel || webhookConfigPending || webhookTestPending || webhookStatus.phase!=='listening' || !S.notifications.enabled)return;
+    const requestId=++webhookSequence,pending={requestId,timeout:null};
+    webhookTestPending=pending;
+    pending.timeout=setTimeout(()=>{
+      if(webhookTestPending!==pending)return;
+      webhookTestPending=null;renderWebhookPanel();
+      showError(el.webhookTestNote,'测试请求未及时返回，请检查服务是否仍在运行。');
+    },12000);
+    el.webhookTestNote.textContent='正在通过 HTTP 发送测试消息…';
+    el.webhookTestNote.classList.remove('is-error');renderWebhookPanel();
+    send({type:'webhookTest',requestId});
+  }
+  window.__webhookStatus=payload=>{
+    if(!isPanel || !payload || typeof payload!=='object')return;
+    if(payload.settings)S.webhook=normalizedWebhook(payload.settings);
+    if(hasOwn(payload,'token'))updateWebhookToken(payload.token);
+    webhookStatus={
+      phase:['disabled','listening','error'].includes(payload.phase)?payload.phase:'disabled',
+      message:webhookText(payload.message),endpoint:webhookText(payload.endpoint,256),
+      lanAddresses:Array.isArray(payload.lanAddresses)?payload.lanAddresses.filter(address=>typeof address==='string' && /^(?:\d{1,3}\.){3}\d{1,3}$/.test(address) && address.split('.').every(part=>Number(part)<=255)).slice(0,16):[],
+      acceptedCount:Number.isSafeInteger(payload.acceptedCount)&&payload.acceptedCount>=0?payload.acceptedCount:0,
+      lastReceivedAt:typeof payload.lastReceivedAt==='number'||typeof payload.lastReceivedAt==='string'?payload.lastReceivedAt:null
+    };
+    renderWebhookPanel();
+  };
+  window.__webhookConfigResult=payload=>{
+    if(!isPanel || !payload || !webhookConfigPending || payload.requestId!==webhookConfigPending.requestId)return;
+    const pending=webhookConfigPending;clearTimeout(pending.timeout);webhookConfigPending=null;
+    if(payload.ok){
+      S.webhook=normalizedWebhook(payload.settings || pending.settings || S.webhook);
+      if(pending.kind==='configure')webhookDraftDirty=false;
+      if(hasOwn(payload,'token'))updateWebhookToken(payload.token);
+    }
+    el.webhookConfigNote.textContent=webhookText(payload.message) || (payload.ok?(pending.kind==='rotate'?'新令牌已生成，旧令牌已失效。':'设置已保存'):'保存失败，请重试');
+    el.webhookConfigNote.classList.toggle('is-error',!payload.ok);
+    renderWebhookPanel();requestWebhookStatus();
+  };
+  window.__webhookTestResult=payload=>{
+    if(!isPanel || !payload || !webhookTestPending || payload.requestId!==webhookTestPending.requestId)return;
+    clearTimeout(webhookTestPending.timeout);webhookTestPending=null;
+    el.webhookTestNote.textContent=webhookText(payload.message) || (payload.ok?'测试消息已通过 HTTP 送达。':'发送失败，请检查服务设置。');
+    el.webhookTestNote.classList.toggle('is-error',!payload.ok);
+    renderWebhookPanel();requestWebhookStatus();
+  };
+
+
+  function renderPhonePanel() {
+    if(!isPanel)return;
+    const unsupported=platform==='macos' || phoneStatus.supported===false,busy=!!phoneConfigPending;
+    if(!busy){el.phoneEnabled.checked=S.phone.enabled;el.phoneHideContent.checked=S.phone.hideContent;}
+    for(const node of [el.phoneEnabled,el.phoneHideContent])node.disabled=unsupported || busy;
+    el.phoneSupportNote.textContent=unsupported?'本版手机通知仅支持 Windows + Android。':phoneStatus.supported===null?'正在检查此电脑的蓝牙支持…':'';
+    const phases={disabled:'同步已关闭',idle:'等待连接',scanning:'正在扫描设备…',connecting:'正在连接…',connected:'已连接',reconnecting:'正在重新连接…',error:'连接失败',unsupported:'此设备不支持手机通知'};
+    const phase=!S.phone.enabled?'disabled':phoneStatus.phase;
+    const name=phoneStatus.deviceName || S.phone.deviceName;
+    el.phoneNavStatus.textContent=unsupported?'暂不支持':!S.phone.enabled?'未开启':phases[phase] || '等待连接';
+    el.phoneStatus.textContent=(phases[phase] || '等待连接')+(name && phase==='connected'?' · '+name:'')+(phoneStatus.message && S.phone.enabled?' · '+phoneStatus.message:'');
+    el.phoneAccessNote.textContent=S.phone.enabled && phoneStatus.notificationAccess===false?'请在 Android 手机端允许通知访问。':'';
+    const ready=!unsupported && phoneStatus.supported===true && S.phone.enabled && !busy;
+    el.btnPhoneScan.disabled=!ready || ['scanning','connecting','reconnecting'].includes(phase);
+    el.btnPhoneScan.textContent=phase==='scanning'?'扫描中…':'扫描设备';
+    el.btnPhoneDisconnect.hidden=!S.phone.deviceAddress && !phoneStatus.deviceAddress && phase!=='connected' && phase!=='connecting' && phase!=='reconnecting';
+    el.btnPhoneDisconnect.disabled=unsupported || busy;
+    el.phoneDevices.replaceChildren();
+    for(const device of phoneStatus.devices || []){
+      const li=document.createElement('li');li.className='phone-device';
+      const info=document.createElement('span');info.className='phone-device__info';
+      const label=document.createElement('span');label.className='phone-device__name';label.textContent=device.name || 'Android 手机';
+      const address=document.createElement('span');address.className='phone-device__address';address.textContent=device.address;
+      const button=document.createElement('button');button.className='btn btn--sm';button.dataset.phoneAddress=device.address;
+      const connected=phase==='connected' && device.address===phoneStatus.deviceAddress;
+      button.textContent=connected?'已连接':'连接';button.disabled=!ready || connected || ['connecting','reconnecting'].includes(phase);
+      button.addEventListener('click',()=>send({type:'phoneConnect',address:device.address}));
+      info.append(label,address);li.append(info,button);el.phoneDevices.append(li);
+    }
+  }
+  function savePhoneConfig() {
+    if(!isPanel || phoneConfigPending || platform==='macos' || phoneStatus.supported===false)return;
+    const settings={enabled:el.phoneEnabled.checked,displaySeconds:S.phone.displaySeconds,hideContent:el.phoneHideContent.checked};
+    phoneConfigPending={previous:{...S.phone}};
+    S.phone=normalizedPhone({...S.phone,...settings});renderPhonePanel();
+    el.phoneConfigNote.classList.remove('is-error');el.phoneConfigNote.textContent='正在保存…';
+    send({type:'phoneConfigure',settings});
+  }
+  window.__phoneStatus=payload=>{
+    if(!payload || typeof payload!=='object')return;
+    const wasConnected=phoneStatus.phase==='connected';
+    phoneStatus={...phoneStatus,...payload,supported:platform==='macos'?false:payload.supported===true,
+      message:phoneText(payload.message,500),deviceName:phoneText(payload.deviceName,128),deviceAddress:phoneText(payload.deviceAddress,128),
+      devices:Array.isArray(payload.devices)?payload.devices.slice(0,32).filter(device=>device && typeof device.address==='string').map(device=>({address:phoneText(device.address,128),name:phoneText(device.name,128)})):[]};
+    if(phoneStatus.notificationAccess===false || (wasConnected && ['reconnecting','error','disabled','idle'].includes(phoneStatus.phase)))notificationCenter?.clearSource('phone');
+    renderPhonePanel();reconcileNotifications();
+  };
+  window.__phoneConfigResult=payload=>{
+    if(!payload || typeof payload!=='object')return;
+    S.phone=normalizedPhone(payload.settings || phoneConfigPending?.previous || S.phone);
+    phoneConfigPending=null;
+    renderPhonePanel();reconcileNotifications();
+    if(isPanel){el.phoneConfigNote.textContent=phoneText(payload.message,500) || (payload.ok?'设置已保存':'保存失败');el.phoneConfigNote.classList.toggle('is-error',!payload.ok);}
+  };
+  window.__phoneNotification=payload=>{
+    if(isPanel || !payload || !S.phone.enabled || phoneStatus.supported!==true || phoneStatus.notificationAccess!==true || phoneStatus.phase!=='connected')return;
+    notificationCenter?.receive({...payload,source:'phone',title:S.phone.hideContent?'':payload.title,body:S.phone.hideContent?'':payload.body});
+  };
 
   function buildDial() {
     if (isPanel) return;
@@ -148,6 +604,7 @@
     el.btnToggle.setAttribute('aria-label',running?'暂停倒计时':done?'再来一次':'开始倒计时');
     el.btnToggle.title = running?'暂停':done?'再来一次':'开始';
     el.btnStart.textContent = running?'暂停':done?'再来一次':timerStarted?'继续':'开始';
+    if (isPanel) el.timerNavStatus.textContent=running?'正在计时':done?'已完成':timerStarted?'已暂停':'准备开始';
   }
   function renderTasks() {
     el.taskList.replaceChildren();
@@ -242,42 +699,73 @@
     if (invalid) {showError(el.taskNote,'启用命令时请输入 1–4096 个字符，不能包含空字符');return null;}
     return {enabled,kind,command,delaySec};
   }
-  function setPanelPage(page) {
-    if (!isPanel || !['settings','create','task'].includes(page)) return;
+  function setPanelPage(page,{focus=true}={}) {
+    if (!isPanel || !hasOwn(panelRoutes,page)) return;
     if (page==='task' && !editingTask()) return;
     closeActionKindMenu();
-    if (panelPage==='settings' && page!=='settings') settingsScrollTop=el.settingsPage.scrollTop;
+    const previous=panelPage,route=panelRoutes[page],root=panelRoot(page),revision=++panelNavigationRevision;
+    panelScrollPositions.set(previous,el[panelRoutes[previous].element].scrollTop);
+    // Move focus off the outgoing view before marking it inaccessible.
+    if (page!==previous && el[panelRoutes[previous].element].contains(document.activeElement)) document.activeElement.blur();
     panelPage=page;
-    for (const [node,name] of [[el.settingsPage,'settings'],[el.taskCreatePage,'create'],[el.taskSettingsPage,'task']]) {
-      const active=page===name;node.classList.toggle('is-active',active);node.inert=!active;
+    for (const [name,entry] of Object.entries(panelRoutes)) {
+      const node=el[entry.element],active=page===name;
+      node.classList.toggle('is-active',active);node.inert=!active;
       node.setAttribute('aria-hidden',String(!active));
     }
-    el.panelTitle.textContent=page==='create'?'新增任务':page==='task'?'任务设置':'设置';
-    el.btnTaskBack.hidden=page==='settings';
-    if (page==='settings') {editingTaskId='';el.settingsPage.scrollTop=settingsScrollTop;}
+    for (const button of $$('[data-panel-page]',el.panelNav)) {
+      const active=button.dataset.panelPage===root;
+      button.classList.toggle('is-active',active);
+      if (active) button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');
+      const entry=panelRoutes[button.dataset.panelPage];
+      if (entry) button.setAttribute('aria-controls',entry.element);
+    }
+    el.panelTitle.textContent=route.title;
+    el.btnTaskBack.hidden=!route.parent;
+    el.btnTaskBack.setAttribute('aria-label',route.parent?'返回'+panelRoutes[root].title:'返回');
+    if (page!=='task') editingTaskId='';
+    el[route.element].scrollTop=panelScrollPositions.get(page) || 0;
     if (page==='task') {renderTaskDuration();renderActionConfig();}
-    renderActionStatus();
+    renderActionStatus();renderPhonePanel();
+    if(page!=='webhook'){webhookTokenVisible=false;webhookEndpointVisible=false;relayEndpointVisible=false;}
+    renderWebhookPanel();
+    if(page==='webhook')requestWebhookStatus();
+    if (!focus) return;
+    // Returning from a task restores its initiating control and list position.
+    const returning=page==='timer' && panelRoutes[previous].parent==='timer';
+    // Resolve the target after layout: a state update can rebuild the task list
+    // between navigation and this frame. Ignore callbacks from earlier routes.
     requestAnimationFrame(()=>{
-      if (panelPage!==page) return;
-      const target=page==='create'?(pendingTaskCreate?el.btnTaskBack:el.inTaskName):page==='task'?(taskDurationPending.has(editingTaskId)?el.btnTaskBack:el.editTaskMin):
-        $$('.task__edit',el.taskList).find(button=>button.dataset.taskId===settingsReturnTaskId) || el.btnOpenTaskPage;
+      if (revision!==panelNavigationRevision || panelPage!==page) return;
+      const active=document.activeElement;
+      // A user may already have chosen an input before this frame runs.
+      if(el[route.element].contains(active) && active.matches('input,textarea,select,button,a[href],[contenteditable="true"],[tabindex]:not([tabindex="-1"])') && !active.disabled) return;
+      const target=page==='create'?(pendingTaskCreate?el.btnTaskBack:el.inTaskName):
+        page==='task'?(taskDurationPending.has(editingTaskId)?el.btnTaskBack:el.editTaskMin):
+        returning?$$('.task__edit',el.taskList).find(button=>button.dataset.taskId===settingsReturnTaskId) || el.btnOpenTaskPage:
+        el[panelRoutes[root].menu];
       target.focus({preventScroll:true});
     });
   }
+  function openNotificationSettings() {
+    setPanelPage('preferences',{focus:false});
+    el.notificationsSettings.scrollIntoView({block:'start',behavior:'instant'});
+    (el.notificationsEnabled.disabled?el.notificationsSettings:el.notificationsEnabled).focus({preventScroll:true});
+  }
   function setTaskPage(show) {
     if (show) settingsReturnTaskId='';
-    setPanelPage(show?'create':'settings');
+    setPanelPage(show?'create':'timer');
   }
   function openTaskSettings(taskId) {
     if (!S.tasks.some(task=>task.id===taskId)) return;
-    editingTaskId=taskId;settingsReturnTaskId=taskId;el.taskSettingsPage.scrollTop=0;
+    editingTaskId=taskId;settingsReturnTaskId=taskId;panelScrollPositions.set('task',0);
     setPanelPage('task');
   }
   function reconcileTaskEditors() {
     const ids=new Set(S.tasks.map(task=>task.id));
     for (const drafts of [actionDrafts,actionPending,taskDurationDrafts,taskDurationPending]) for (const id of drafts.keys()) if(!ids.has(id))drafts.delete(id);
     if (actionDraftScope && !ids.has(actionDraftScope)) actionDraftScope=null;
-    if (panelPage==='task' && !ids.has(editingTaskId)) setPanelPage('settings');
+    if (panelPage==='task' && !ids.has(editingTaskId)) setPanelPage('timer');
   }
   function setTaskCreateBusy(busy) {
     if (busy && kindMenuOpen && activeKindEditor?.creating) closeActionKindMenu();
@@ -495,7 +983,7 @@
     renderTasks();reconcileTaskEditors();renderTaskDuration();renderActionConfig();renderActionStatus();
   }
   function renderAll() {
-    renderState(); renderTime(); renderPanel();
+    renderState(); renderTime(); renderPanel();renderPhonePanel();renderNotificationsPanel();renderWebhookPanel();reconcileNotifications();
     el.island.classList.toggle('is-hide-hands',!S.settings.showHands);
     document.body.classList.toggle('reduce-motion',!!S.settings.reduceMotion);
     if (!isPanel) scheduleClock();
@@ -524,6 +1012,9 @@
         // restores the dial region, reveal the requested dial as well.
         if (requestedOpen) showOpen();
       });
+      // The companion acquires its own native ACK after this restore command.
+      // A subsequent close may cancel the dial ACK, but must not leave it suspended.
+      notificationCenter?.suspend(false);
     }
   }
   function cancelCompletionIdle() {
@@ -540,7 +1031,7 @@
     cancelCompletionIdle();completedIdle=true;
     // Keep runId, completion facts and pending native actions intact: this is
     // presentation only, unlike reset(). Closing cancels any stale effect ACK.
-    cancelEffect();renderTime();renderState();closeIsland();scheduleClock();publishTimer(true);
+    cancelEffect();renderTime();renderState();closeIsland();scheduleClock();publishTimer(true);notificationCenter?.syncMain();
   }
   function reset() {
     if (isPanel) return;
@@ -745,7 +1236,25 @@
       },2000);
     } else checkViewport();
   }
+  function requestNotificationLayout(layout,ready=()=>{},failed=()=>{}) {
+    if(noticeViewportPending)clearTimeout(noticeViewportPending.timeout);
+    const request={id:0,ready,timeout:null,attempts:0};noticeViewportPending=request;
+    const attempt=()=>{
+      request.id=++viewportSequence;++request.attempts;
+      send({type:'setNotificationLayout',...layout,requestId:request.id});
+      if(!nativeViewport){noticeViewportPending=null;ready();return;}
+      request.timeout=setTimeout(()=>{
+        if(noticeViewportPending!==request)return;
+        // Retry once with a fresh identity; an obsolete ACK cannot reveal stale UI.
+        if(request.attempts<2){attempt();return;}
+        noticeViewportPending=null;failed();
+        send({type:'frontendError',message:'Notification layout ACK timed out: '+request.id});
+      },2000);
+    };
+    attempt();
+  }
   window.__viewportReady=requestId=>{
+    if(noticeViewportPending?.id===Number(requestId)){const request=noticeViewportPending;clearTimeout(request.timeout);noticeViewportPending=null;request.ready();return;}
     if (viewportPending?.id!==Number(requestId)) return;
     viewportPending.acknowledged=true;
     checkViewport();
@@ -804,7 +1313,7 @@
   }
   function openIsland(instant=false) {
     if (isPanel) return;
-    cancelClose(); requestedOpen = true;
+    cancelClose(); requestedOpen = true;notificationCenter?.syncMain();
     syncIdleEyes();
     const generation = ++shapeGeneration;
     requestViewport({type:'setShape',open:true},DIAL_SIZE,DIAL_SIZE,()=>{
@@ -814,7 +1323,7 @@
   function closeIsland() {
     if (isPanel || !requestedOpen || effectActive) return;
     cancelClose(); cancelViewport();
-    requestedOpen = false;
+    requestedOpen = false;notificationCenter?.syncMain();
     const generation = ++shapeGeneration, wasOpen = el.island.classList.contains('is-open');
     el.island.classList.remove('is-open');
     el.island.setAttribute('aria-expanded','false');
@@ -852,6 +1361,7 @@
     el.island.classList.remove('is-cracking','is-finishing');
     el.fx.replaceChildren(); effectActive=false;
     requestViewport({type:'setEffect',active:false},DIAL_SIZE,DIAL_SIZE);
+    notificationCenter?.suspend(false);
     scheduleClock();
     send({type:'animationDone'});
     if (selftesting) {
@@ -863,7 +1373,7 @@
   }
   function crack() {
     cancelEffect();cancelClose();
-    effectActive=true;requestedOpen=true;++shapeGeneration;
+    effectActive=true;notificationCenter?.suspend(true);requestedOpen=true;++shapeGeneration;
     const generation=effectGeneration;
     scheduleClock();
     // One native resize goes straight to the effect viewport. Keep the current
@@ -934,12 +1444,13 @@
     el.btnToggle.addEventListener('click',e=>{e.stopPropagation();toggle();});
     el.btnReset.addEventListener('click',e=>{e.stopPropagation();reset();});
     document.addEventListener('keydown',e=>{
+      if(e.defaultPrevented)return;
       if (e.key==='Escape') closeIsland();
       if (e.key==='Enter' && e.target===el.island) {e.preventDefault(); if(done && !completedIdle)returnToCompletedIdle();else if(!effectActive)isOpen()?closeIsland():openIsland();}
       if (e.key===' ' && !e.target.matches('input,button')) {e.preventDefault();toggle();}
     });
     document.addEventListener('visibilitychange',resumeView);
-    motionPreference.addEventListener('change',syncIdleEyes);
+    motionPreference.addEventListener('change',()=>{syncIdleEyes();notificationCenter?.syncMain();});
     window.addEventListener('pagehide',()=>{idlePageActive=false;stopIdleCycle();stopIdleEyes();});
     window.addEventListener('pageshow',()=>{idlePageActive=true;resumeView();});
     window.addEventListener('focus',resumeView);
@@ -991,6 +1502,67 @@
         e.preventDefault();el.btnApplyTopOffset.click();
       }
     });
+    el.panelNav.addEventListener('click',event=>{
+      const button=event.target.closest('button[data-panel-page]');
+      if (button && el.panelNav.contains(button)) setPanelPage(button.dataset.panelPage);
+    });
+    el.panelNav.addEventListener('keydown',event=>{
+      if(event.isComposing || !['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+      const buttons=$$('button[data-panel-page]:not(:disabled)',el.panelNav);
+      const index=buttons.indexOf(document.activeElement);
+      if(index<0)return;
+      event.preventDefault();
+      const next=event.key==='Home'?0:event.key==='End'?buttons.length-1:
+        (index+(['ArrowUp','ArrowLeft'].includes(event.key)?-1:1)+buttons.length)%buttons.length;
+      buttons[next].focus();
+    });
+    setPanelPage(panelPage,{focus:false});
+    el.relayEnabled.addEventListener('change',markRelayDraft);
+    for(const node of [el.relayServiceUrl,el.relayConnectionKey]){
+      node.addEventListener('input',markRelayDraft);
+      node.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.isComposing&&!event.repeat){event.preventDefault();saveRelayConfig();}});
+    }
+    el.btnSaveRelay.addEventListener('click',saveRelayConfig);
+    el.btnRevealRelayEndpoint.addEventListener('click',()=>{relayEndpointVisible=!relayEndpointVisible;renderRelayPanel();});
+    el.btnCopyRelayEndpoint.addEventListener('click',()=>copyWebhookValue(el.relayEndpoint.value,el.relayEndpoint,'外部 Webhook 地址',el.relayCopyNote));
+    const hideRelayEndpoint=()=>{relayEndpointVisible=false;el.relayEndpoint.type='password';el.btnRevealRelayEndpoint.textContent='显示';el.btnRevealRelayEndpoint.setAttribute('aria-pressed','false');};
+    window.addEventListener('blur',hideRelayEndpoint);window.addEventListener('pagehide',hideRelayEndpoint);
+    el.webhookEnabled.addEventListener('change',markWebhookDraft);
+    el.webhookPort.addEventListener('input',markWebhookDraft);
+    el.webhookPublicBaseUrl.addEventListener('input',markWebhookDraft);
+    el.webhookPublicBaseUrl.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.isComposing&&!event.repeat){event.preventDefault();saveWebhookConfig();}});
+    el.webhookPort.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.isComposing&&!event.repeat){event.preventDefault();saveWebhookConfig();}});
+    for(const [button,scope] of [[el.webhookScopeLocal,'local'],[el.webhookScopeLan,'lan']]){
+      button.addEventListener('click',()=>{if(webhookConfigPending)return;webhookDraftScope=scope;markWebhookDraft();});
+      button.addEventListener('keydown',event=>{
+        if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key) || webhookConfigPending)return;
+        event.preventDefault();
+        const next=event.key==='Home'?el.webhookScopeLocal:event.key==='End'?el.webhookScopeLan:scope==='local'?el.webhookScopeLan:el.webhookScopeLocal;
+        next.click();next.focus();
+      });
+    }
+    el.btnSaveWebhook.addEventListener('click',saveWebhookConfig);
+    el.btnRotateWebhookToken.addEventListener('click',rotateWebhookToken);
+    el.btnRevealWebhookToken.addEventListener('click',()=>{webhookTokenVisible=!webhookTokenVisible;renderWebhookPanel();});
+    el.btnCopyWebhookToken.addEventListener('click',()=>copyWebhookValue(webhookToken,el.webhookToken,'令牌'));
+    el.btnCopyWebhookEndpoint.addEventListener('click',()=>copyWebhookValue(el.webhookEndpoint.value,el.webhookEndpoint,'Webhook 地址'));
+    el.btnRevealWebhookEndpoint.addEventListener('click',()=>{webhookEndpointVisible=!webhookEndpointVisible;renderWebhookPanel();});
+    el.btnTestWebhook.addEventListener('click',sendWebhookTest);
+    el.btnWebhookNotifications.addEventListener('click',openNotificationSettings);
+    const hideWebhookToken=()=>{webhookTokenVisible=false;webhookEndpointVisible=false;el.webhookEndpoint.type='password';el.btnRevealWebhookEndpoint.textContent='显示';el.btnRevealWebhookEndpoint.setAttribute('aria-pressed','false');if(el.webhookToken)el.webhookToken.type='password';if(el.btnRevealWebhookToken){el.btnRevealWebhookToken.textContent='显示';el.btnRevealWebhookToken.setAttribute('aria-pressed','false');}};
+    window.addEventListener('blur',hideWebhookToken);window.addEventListener('pagehide',hideWebhookToken);
+
+    el.btnPhoneNotificationSettings.addEventListener('click',openNotificationSettings);
+    el.notificationsEnabled.addEventListener('change',()=>{notificationsDraftDirty=true;saveNotificationsConfig();});
+    for(const node of [el.notificationDisplaySeconds,el.notificationListLimit]){
+      node.addEventListener('input',()=>{notificationsDraftDirty=true;node.setAttribute('aria-invalid','false');el.notificationsConfigNote.textContent='尚未保存';el.notificationsConfigNote.classList.remove('is-error');});
+      node.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.isComposing&&!e.repeat){e.preventDefault();saveNotificationsConfig();}});
+    }
+    el.btnSaveNotifications.addEventListener('click',saveNotificationsConfig);
+    el.btnTestNotification.addEventListener('click',()=>send({type:'notificationTest'}));
+    for(const input of [el.phoneEnabled,el.phoneHideContent])input.addEventListener('change',savePhoneConfig);
+    el.btnPhoneScan.addEventListener('click',()=>send({type:'phoneScan'}));
+    el.btnPhoneDisconnect.addEventListener('click',()=>send({type:'phoneDisconnect'}));
     el.btnOpenTaskPage.addEventListener('click',()=>setTaskPage(true));
     el.btnTaskBack.addEventListener('click',()=>setTaskPage(false));
     el.btnCancelTask.addEventListener('click',()=>setTaskPage(false));
@@ -1036,7 +1608,7 @@
       if(e.key!=='Escape' || e.isComposing || e.defaultPrevented)return;
       e.preventDefault();
       if(kindMenuOpen)closeActionKindMenu(true);
-      else if(panelPage!=='settings')setPanelPage('settings');
+      else if(panelRoutes[panelPage].parent)setPanelPage(panelRoutes[panelPage].parent);
       else send({type:'hidePanel'});
     });
     for (const [id,key] of Object.entries({
@@ -1051,7 +1623,7 @@
   window.__applyState = (state,resetTimer=false) => {
     if (!state) return;
     const previousDuration = S.duration_sec,previousTaskId = S.current_id;
-    S = {...S,...state,settings:{...S.settings,...state.settings}};
+    S = {...S,...state,settings:{...S.settings,...state.settings},phone:normalizedPhone({...S.phone,...state.phone}),notifications:normalizedNotifications({...S.notifications,...state.notifications}),webhook:normalizedWebhook({...S.webhook,...state.webhook}),relay:normalizedRelay({...S.relay,...state.relay})};
     S.duration_sec = duration(S.duration_sec);
     if (resetTimer || S.duration_sec!==previousDuration || S.current_id!==previousTaskId) {
       durationDraftDirty=false;
@@ -1082,7 +1654,7 @@
     pendingTaskCreate=null;setTaskCreateBusy(false);
     if (!payload.ok) {showError(el.taskNote,String(payload.message || '创建失败，请重试'));return;}
     el.inTaskName.value='';resetCreateAction();el.taskNote.textContent='';el.taskNote.classList.remove('is-error');
-    el.taskCreatePage.scrollTop=0;
+    el.taskCreatePage.scrollTop=0;panelScrollPositions.set('create',0);
     // A late response cannot move the user away from the settings page.
     if (panelPage==='create') setTaskPage(false);
   };
@@ -1129,7 +1701,12 @@
   };
   window.__checkHandGeometry = handGeometry;
 
+  if(!isPanel){
+    notificationCenter=window.createNotificationCenter({sendLayout:requestNotificationLayout,mainOpen:()=>requestedOpen,closeMain:closeIsland,reducedMotion,onPresenceChange:scheduleClock});
+    notificationCenter.bind();
+  }
   initializeActionKinds();buildDial();renderAll();bindIsland();bindPanel();
   if (!isPanel) {scheduleClock();publishTimer(true);}
   send({type:'pageReady',view:isPanel?'panel':'island'});
+  if(isPanel)requestWebhookStatus();
 })();

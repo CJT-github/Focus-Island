@@ -19,9 +19,9 @@ async function run(options = {}) {
     settings:{showHands:true,showSecond:true,sound:false,notify:false,alwaysOnTop:true,reduceMotion:false}
   };
   try {
-    const [template,css,app] = await Promise.all(['index.html','styles.css','app.js'].map(file=>fs.readFile(path.join(root,'ui',file),'utf8')));
+    const [template,css,notifications,app] = await Promise.all(['index.html','styles.css','notifications.js','app.js'].map(file=>fs.readFile(path.join(root,'ui',file),'utf8')));
     const html = (view,initialState=state,geometry={}) => template.replace('/*__CSS__*/',()=>css).replace('__VIEW__',view)
-      .replace('/*__GEO__*/',()=>JSON.stringify(geometry)).replace('/*__STATE__*/',()=>JSON.stringify(initialState)).replace('/*__JS__*/',()=>app);
+      .replace('/*__GEO__*/',()=>JSON.stringify(geometry)).replace('/*__STATE__*/',()=>JSON.stringify(initialState)).replace('/*__JS__*/',()=>(notifications+'\n'+app));
     const expectClock = page => page.waitForFunction(()=>{
       const now=new Date(),pad=n=>String(n).padStart(2,'0');
       const expected=[now.getHours(),now.getMinutes(),now.getSeconds()].map(pad).join(':');
@@ -77,12 +77,14 @@ async function run(options = {}) {
     await panel.click('#btnCancelTask');assert.equal(await panel.locator('#settingsPage').getAttribute('aria-hidden'),'false');await panel.click('#btnOpenTaskPage');assert.equal(await panel.inputValue('#inTaskName'),'三秒任务');
     const hideBeforeTaskEscape=await panel.evaluate(()=>messages.filter(m=>m.type==='hidePanel').length);await panel.keyboard.press('Escape');assert.equal(await panel.locator('#settingsPage').getAttribute('aria-hidden'),'false');assert.equal(await panel.evaluate(()=>messages.filter(m=>m.type==='hidePanel').length),hideBeforeTaskEscape);await panel.click('#btnOpenTaskPage');
     let beforeInvalid=(await panel.evaluate(()=>messages)).length;
-    await panel.fill('#inTaskSec','-2');await panel.click('#btnAddTask');assert.equal((await panel.evaluate(()=>messages)).length,beforeInvalid);
+    await panel.fill('#inTaskSec','-2');await panel.click('#btnAddTask');assert.equal((await panel.evaluate(()=>messages)).length,beforeInvalid,JSON.stringify(await panel.evaluate(()=>messages)));
     await panel.fill('#inTaskSec','3');await panel.click('#btnAddTask');
     assert.equal(await panel.locator('#btnAddTask').isDisabled(),true);await panel.locator('#btnAddTask').evaluate(node=>node.click());
     let messages = await panel.evaluate(()=>messages);
     const createRequest=messages.find(message=>message.type==='addTask');assert(Number.isSafeInteger(createRequest.requestId)&&createRequest.requestId>0);
-    assert.deepEqual(messages.slice(1).map(({at,...msg})=>msg),[
+    assert.equal(messages.filter(message=>message.type==='webhookStatus').length,1);
+    assert.equal(messages.filter(message=>message.type==='relayStatus').length,1);
+    assert.deepEqual(messages.slice(1).filter(message=>!['webhookStatus','relayStatus'].includes(message.type)).map(({at,...msg})=>msg),[
       {type:'toggleTimer'},{type:'resetTimer'},{type:'clearTasks'},
       {type:'setDuration',sec:3723},{type:'addTask',name:'三秒任务',sec:3,completionAction:{enabled:false,kind:'command',command:'',delaySec:10},requestId:createRequest.requestId}
     ]);
@@ -124,6 +126,7 @@ async function run(options = {}) {
     await positionPanel.evaluate(s=>__applyState({...s,settings:{...s.settings,topOffset:80}}),state);
     assert.equal(await positionPanel.inputValue('#inTopOffset'),'80');
     await positionPanel.fill('#inH','7');
+    await positionPanel.click('#btnOpenPreferencesPage');
     await positionPanel.fill('#inTopOffset','92');
     await positionPanel.evaluate(s=>__applyState({...s,settings:{...s.settings,topOffset:80,sound:true}}),state);
     assert.equal(await positionPanel.inputValue('#inTopOffset'),'92','unrelated broadcasts preserve a position draft');
@@ -151,7 +154,7 @@ async function run(options = {}) {
     const offsetButtonBounds=await positionPanel.locator('#btnApplyTopOffset').boundingBox();
     assert(offsetBounds.x>=0 && offsetBounds.x+offsetBounds.width<=340);
     assert(offsetButtonBounds.x+offsetButtonBounds.width<=offsetBounds.x+offsetBounds.width+1);
-    assert((await positionPanel.evaluate(()=>messages)).every(message=>['pageReady','updateSettings'].includes(message.type)));
+    assert((await positionPanel.evaluate(()=>messages)).every(message=>['pageReady','webhookStatus','relayStatus','updateSettings'].includes(message.type)));
 
     await positionIsland.clock.setFixedTime(new Date('2030-01-01T12:00:00Z'));
     const stableTimer=()=>positionIsland.evaluate(()=>{
@@ -225,7 +228,7 @@ async function run(options = {}) {
     await durationPanel.evaluate(s=>__applyState({...s,tasks:s.tasks.filter(task=>task.id!=='b')},false),changedTaskB);
     await durationPanel.evaluate(request=>__taskDurationResult({ok:true,...request}),removedRequest);
     assert.equal(await durationPanel.locator('#settingsPage').getAttribute('aria-hidden'),'false');
-    assert((await durationPanel.evaluate(()=>messages)).every(message=>['pageReady','setTaskDuration'].includes(message.type)),'editing tasks must not select or reset the current timer');
+    assert((await durationPanel.evaluate(()=>messages)).every(message=>['pageReady','webhookStatus','relayStatus','setTaskDuration'].includes(message.type)),'editing tasks must not select or reset the current timer');
     await durationPanel.close();
     checks.push('task duration editor isolates task/action drafts, validates seconds and limits, disables duplicate saves, matches scoped request IDs, preserves failures and ignores deleted-task callbacks');
 

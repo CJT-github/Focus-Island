@@ -16,8 +16,8 @@ const fixture={tasks:[{id:'a',name:'动作验证 A',sec:2},{id:'b',name:'动作�
   settings:{showHands:true,showSecond:true,showIdleClock:true,showIdleEyes:false,sound:false,notify:false,alwaysOnTop:true,reduceMotion:true}};
 const clone=value=>JSON.parse(JSON.stringify(value));
 async function htmlFactory(){
-  const [template,css,app]=await Promise.all(['index.html','styles.css','app.js'].map(file=>fs.readFile(path.join(root,'ui',file),'utf8')));
-  return (view,state=fixture,platform='windows')=>template.replace('/*__CSS__*/',()=>css).replace('__VIEW__',view).replace('/*__GEO__*/','{}').replace('/*__STATE__*/',()=>JSON.stringify(state)).replace('/*__JS__*/',()=>('window.__PLATFORM__='+JSON.stringify(platform)+';\n'+app));
+  const [template,css,notifications,app]=await Promise.all(['index.html','styles.css','notifications.js','app.js'].map(file=>fs.readFile(path.join(root,'ui',file),'utf8')));
+  return (view,state=fixture,platform='windows')=>template.replace('/*__CSS__*/',()=>css).replace('__VIEW__',view).replace('/*__GEO__*/','{}').replace('/*__STATE__*/',()=>JSON.stringify(state)).replace('/*__JS__*/',()=>('window.__PLATFORM__='+JSON.stringify(platform)+';\n'+notifications+'\n'+app));
 }
 async function input(page,selector,value){await page.locator(selector).fill(String(value));}
 async function setChecked(page,selector,value){if(await page.locator(selector).isChecked()!==value)await page.locator(selector).evaluate(node=>node.click());}

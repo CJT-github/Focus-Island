@@ -73,6 +73,28 @@
   <div class="island__fx" id="fx" aria-hidden="true"></div>
 </div>
 
+
+<!-- Message companion stays beside the timer on the same fixed native canvas. -->
+<div class="notice-bridge" id="noticeBridge" aria-hidden="true" hidden></div>
+<button class="notice-companion" id="noticeCompanion" type="button" aria-label="查看通知" aria-expanded="false" aria-controls="noticeList" hidden>
+  <span class="notice-surface" id="noticeSurface" aria-hidden="true"></span>
+  <span class="notice-preview" id="noticePreview">
+    <span class="notice-preview__copy">
+      <span class="notice-preview__title" id="noticeTitle"></span>
+      <span class="notice-preview__body" id="noticeBody"></span>
+    </span>
+    <span class="notice-preview__app" id="noticeApp"></span>
+  </span>
+  <span class="notice-count" id="noticeCount" hidden>0</span>
+</button>
+<section class="notice-list" id="noticeList" aria-label="未读消息列表" hidden>
+  <div class="notice-list__head">
+    <span class="notice-list__heading">消息 <span id="noticeListCount">0</span></span>
+    <button class="mini-btn notice-list__close" id="btnCloseNoticeList" type="button" aria-label="收起消息列表"><svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="m7 14 5-5 5 5"/></svg></button>
+  </div>
+  <ul class="notice-items" id="noticeItems"></ul>
+</section>
+
 <!-- ============================================================
      设置面板（独立浮窗）
      ============================================================ -->
@@ -80,18 +102,42 @@
   <div class="panel" id="panel">
     <div class="panel__head" id="panelDragHandle">
       <div class="panel__heading">
-        <button class="mini-btn task-back" id="btnTaskBack" aria-label="返回设置" hidden><svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m14 6-6 6 6 6"/></svg></button>
-        <span class="panel__title" id="panelTitle">设置</span>
+        <button class="mini-btn task-back" id="btnTaskBack" aria-label="返回倒计时" hidden><svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m14 6-6 6 6 6"/></svg></button>
+        <span class="panel__brand" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="7" width="18" height="10" rx="5" fill="currentColor"/><path d="M9 12h6" stroke="#151b24" stroke-width="1.5" stroke-linecap="round"/></svg></span><span class="panel__title" id="panelTitle">倒计时</span>
       </div>
       <button class="mini-btn" id="btnClose" aria-label="关闭">
         <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </div>
 
+    <div class="panel__body">
+      <nav class="panel-nav" id="panelNav" aria-label="功能菜单">
+        <div class="panel-nav__label">FOCUS ISLAND</div>
+        <div class="panel-nav__items">
+          <button class="panel-nav__item is-active" id="btnOpenTimerPage" data-panel-page="timer" aria-current="page" aria-controls="settingsPage">
+            <svg class="panel-nav__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 1.5M9 2h6M12 2v3M18 6l1.5-1.5"/></svg>
+            <span class="panel-nav__copy"><span class="panel-nav__name">倒计时</span><span class="panel-nav__status" id="timerNavStatus">准备开始</span></span>
+          </button>
+          <button class="panel-nav__item" id="btnOpenWebhookPage" data-panel-page="webhook" aria-controls="webhookPage">
+            <svg class="panel-nav__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 8-4 4 4 4m8-8 4 4-4 4M14 5l-4 14"/></svg>
+            <span class="panel-nav__copy"><span class="panel-nav__name">Webhook</span><span class="panel-nav__status" id="webhookNavStatus">已关闭</span></span>
+          </button>
+
+          <button class="panel-nav__item" id="btnOpenPhonePage" data-panel-page="phone" aria-controls="phonePage">
+            <svg class="panel-nav__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="3"/><path d="M10 5h4M11 18h2"/><path d="m10 10 4 4-2 2V8l2 2-4 4"/></svg>
+            <span class="panel-nav__copy"><span class="panel-nav__name">手机通知</span><span class="panel-nav__status" id="phoneNavStatus">未连接</span></span>
+          </button>
+          <button class="panel-nav__item" id="btnOpenPreferencesPage" data-panel-page="preferences" aria-controls="preferencesPage">
+            <svg class="panel-nav__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h5m4 0h7M4 17h9m4 0h3"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="17" r="2"/></svg>
+            <span class="panel-nav__copy"><span class="panel-nav__name">通用设置</span><span class="panel-nav__status">外观与提醒</span></span>
+          </button>
+        </div>
+      </nav>
     <div class="panel__pages">
     <div class="panel__scroll panel-page is-active" id="settingsPage">
+      <div class="page-intro"><h1>把时间留给重要的事</h1><p>选择时长，或从任务列表开始。</p></div>
       <section class="mgroup">
-        <div class="mgroup__title">时钟倒计时</div>
+        <div class="mgroup__title">专注时长</div>
         <div class="presets" id="presets">
           <button class="preset" data-min="5">5 分</button>
           <button class="preset" data-min="15">15 分</button>
@@ -112,35 +158,157 @@
         <div class="mgroup__heading"><div class="mgroup__title">倒计时任务</div><button class="task-page-link" id="btnOpenTaskPage"><span aria-hidden="true">＋</span> 新增任务</button></div>
         <ul class="tasks" id="taskList"></ul>
       </section>
-
-
-
       <section class="mgroup">
-        <div class="mgroup__title">显示与提醒</div>
-        <div class="top-offset">
-          <label class="field top-offset__field" for="inTopOffset"><span>距顶部</span><input type="number" id="inTopOffset" min="0" max="1000" step="1" value="20" aria-describedby="topOffsetNote" /><span class="top-offset__unit">px</span></label>
-          <button class="btn btn--sm" id="btnApplyTopOffset">应用</button>
-        </div>
-        <p class="mgroup__note top-offset__note" id="topOffsetNote" role="status" aria-live="polite">默认 20 px，超出屏幕时自动贴合可用区域。</p>
-        <label class="switch"><input type="checkbox" id="swHands" checked /><span class="switch__ui"></span><span class="switch__text">显示真实时钟指针</span></label>
-        <label class="switch"><input type="checkbox" id="swSecond" checked /><span class="switch__ui"></span><span class="switch__text">显示秒针</span></label>
-        <label class="switch"><input type="checkbox" id="swIdleClock" checked /><span class="switch__ui"></span><span class="switch__text">待机时间</span></label>
-        <label class="switch"><input type="checkbox" id="swEyes" /><span class="switch__ui"></span><span class="switch__text">待机眼睛</span></label>
-        <label class="switch"><input type="checkbox" id="swSound" checked /><span class="switch__ui"></span><span class="switch__text">结束提示音</span></label>
-        <label class="switch"><input type="checkbox" id="swNotify" /><span class="switch__ui"></span><span class="switch__text">桌面通知</span></label>
-        <label class="switch"><input type="checkbox" id="swTop" checked /><span class="switch__ui"></span><span class="switch__text">灵动岛始终置顶</span></label>
-        <label class="switch"><input type="checkbox" id="swMotion" /><span class="switch__ui"></span><span class="switch__text">减弱动态效果</span></label>
-      </section>
-
-      <section class="mgroup">
-        <div class="mgroup__title">操作</div>
+        <div class="mgroup__title">计时控制</div>
         <div class="mgroup__acts">
-          <button class="btn btn--sm" id="btnStart">开始 / 暂停</button>
+          <button class="btn btn--gold btn--sm" id="btnStart">开始 / 暂停</button>
           <button class="btn btn--sm" id="btnReset2">重置</button>
           <button class="btn btn--sm btn--danger" id="btnClear">清空任务</button>
         </div>
       </section>
     </div>
+    <section class="panel__scroll panel-page preferences-page" id="preferencesPage" aria-hidden="true" inert>
+      <div class="page-intro"><h1>你的灵动岛，由你设定</h1><p>调整位置、待机显示、提醒与消息展示。</p></div>
+      <section class="mgroup">
+        <h2 class="mgroup__title">岛的位置</h2>
+        <div class="top-offset">
+          <label class="field top-offset__field" for="inTopOffset"><span>距顶部</span><input type="number" id="inTopOffset" min="0" max="1000" step="1" value="20" aria-describedby="topOffsetNote" /><span class="top-offset__unit">px</span></label>
+          <button class="btn btn--sm" id="btnApplyTopOffset">应用</button>
+        </div>
+        <p class="mgroup__note top-offset__note" id="topOffsetNote" role="status" aria-live="polite">默认 20 px，超出屏幕时自动贴合可用区域。</p>
+        <label class="switch"><input type="checkbox" id="swTop" checked /><span class="switch__ui"></span><span class="switch__text">灵动岛始终置顶</span></label>
+      </section>
+      <section class="mgroup">
+        <h2 class="mgroup__title">时钟与待机</h2>
+        <label class="switch"><input type="checkbox" id="swHands" checked /><span class="switch__ui"></span><span class="switch__text">显示真实时钟指针</span></label>
+        <label class="switch"><input type="checkbox" id="swSecond" checked /><span class="switch__ui"></span><span class="switch__text">显示秒针</span></label>
+        <label class="switch"><input type="checkbox" id="swIdleClock" checked /><span class="switch__ui"></span><span class="switch__text">待机时间</span></label>
+        <label class="switch"><input type="checkbox" id="swEyes" /><span class="switch__ui"></span><span class="switch__text">待机眼睛</span></label>
+        <p class="mgroup__note">时间与眼睛都开启时轮流展示，执行中的任务优先。</p>
+      </section>
+      <section class="mgroup">
+        <h2 class="mgroup__title">提醒与动态</h2>
+        <label class="switch"><input type="checkbox" id="swSound" checked /><span class="switch__ui"></span><span class="switch__text">结束提示音</span></label>
+        <label class="switch"><input type="checkbox" id="swNotify" /><span class="switch__ui"></span><span class="switch__text">桌面通知</span></label>
+        <label class="switch"><input type="checkbox" id="swMotion" /><span class="switch__ui"></span><span class="switch__text">减弱动态效果</span></label>
+      </section>
+      <section class="mgroup notification-settings" id="notificationsSettings" aria-labelledby="notificationSettingsTitle" tabindex="-1">
+        <h2 class="mgroup__title" id="notificationSettingsTitle">通知框</h2>
+        <label class="switch"><input type="checkbox" id="notificationsEnabled" checked /><span class="switch__ui"></span><span class="switch__text">开启通知框</span></label>
+        <p class="mgroup__note">消息在灵动岛右侧展示，预览后收起为数量；点击数量展开列表。</p>
+        <div class="notification-fields">
+          <label class="notification-field" for="notificationDisplaySeconds"><span>消息停留时间</span><span class="notification-field__control"><input type="number" id="notificationDisplaySeconds" min="1" max="30" step="1" value="5" /><span>秒</span></span></label>
+          <label class="notification-field" for="notificationListLimit"><span>列表展示数量</span><span class="notification-field__control"><input type="number" id="notificationListLimit" min="1" max="10" step="1" value="5" /><span>条</span></span></label>
+        </div>
+        <p class="mgroup__note notification-settings-note">勾选消息旁的选框即可关闭，后续消息会依次补位。通知展示不影响倒计时。</p>
+        <div class="notification-settings-actions"><button class="btn btn--gold btn--sm" id="btnSaveNotifications" type="button">保存设置</button><button class="btn btn--sm" id="btnTestNotification" type="button">发送测试消息</button></div>
+        <p class="mgroup__note" id="notificationsConfigNote" role="status" aria-live="polite"></p>
+      </section>
+    </section>
+    <section class="panel__scroll panel-page webhook-page" id="webhookPage" aria-hidden="true" inert>
+      <div class="page-intro"><h1>把外部消息送到岛上</h1><p>为脚本、构建服务和其他应用提供一个消息入口。</p></div>
+      <section class="mgroup relay-card">
+        <div class="mgroup__heading"><h2 class="mgroup__title">服务器连接</h2><span class="webhook-phase" id="relayPhase" data-phase="disabled">未连接</span></div>
+        <p id="relayStatusText" class="webhook-status-text" role="status" aria-live="polite">填写服务地址和连接密钥，保存后由程序自动连接。</p>
+        <label class="switch relay-switch"><input type="checkbox" id="relayEnabled" /><span class="switch__ui"></span><span class="switch__text">自动连接服务器</span></label>
+        <label class="webhook-field-label relay-field-label" for="relayServiceUrl">HTTPS 服务地址</label>
+        <input class="webhook-public-input" id="relayServiceUrl" type="url" maxlength="2048" placeholder="https://webhook.tchenmm.online" autocomplete="off" spellcheck="false" aria-describedby="relayConfigNote" />
+        <label class="webhook-field-label relay-field-label" for="relayConnectionKey">连接密钥</label>
+        <input class="webhook-public-input" id="relayConnectionKey" type="password" maxlength="64" autocomplete="new-password" spellcheck="false" placeholder="粘贴服务器提供的 64 位连接密钥" aria-describedby="relayKeyNote relayConfigNote" />
+        <p class="mgroup__note" id="relayKeyNote">连接密钥由服务器提供，只用于此程序连接服务器。</p>
+        <div class="webhook-save-row"><button class="btn btn--gold btn--sm" id="btnSaveRelay" type="button">保存设置</button></div>
+        <p class="mgroup__note webhook-result" id="relayConfigNote" role="status" aria-live="polite"></p>
+        <div class="relay-output">
+          <label class="webhook-field-label" for="relayEndpoint">外部 Webhook 地址</label>
+          <div class="webhook-value-row webhook-url-row"><input id="relayEndpoint" class="webhook-value" type="password" readonly autocomplete="off" spellcheck="false" placeholder="服务器连接成功后显示" /><button class="btn btn--sm" id="btnRevealRelayEndpoint" type="button" aria-pressed="false">显示</button><button class="btn btn--sm" id="btnCopyRelayEndpoint" type="button">复制地址</button></div>
+          <p class="mgroup__note webhook-result" id="relayCopyNote" role="status" aria-live="polite"></p>
+          <p class="webhook-activity" id="relayActivity">已接收 0 条 · 最近消息 尚未收到</p>
+        </div>
+        <p class="mgroup__note">程序会通过 HTTPS 自动接收消息，无需配置本机 SSH。请保持程序运行。</p>
+      </section>
+      <div class="webhook-notification-note" id="webhookNotificationNote" hidden>
+        <p>通知框已关闭，消息不会展示；重新开启后接收新消息。</p><button class="phone-notification-link" id="btnWebhookNotifications" type="button">前往开启通知框 <span aria-hidden="true">→</span></button>
+      </div>
+      <details class="webhook-local" id="webhookLocal"><summary><span>高级：本机与局域网接入</span><small>独立运行，按需开启</small></summary>
+      <div class="webhook-status-card">
+        <div class="webhook-status-card__head"><span class="webhook-phase" id="webhookPhase" data-phase="disabled">已关闭</span><span class="webhook-status-card__label">POST</span></div>
+        <p id="webhookStatusText" class="webhook-status-text" role="status" aria-live="polite">保存并开启后，即可接收外部消息。</p>
+        <p class="webhook-activity" id="webhookActivity">已接收 0 条 · 最近消息 尚未收到</p>
+      </div>
+<section class="mgroup">
+        <h2 class="mgroup__title">本机专属 Webhook</h2>
+        <label class="webhook-field-label" for="webhookEndpoint">Webhook 地址</label>
+        <div class="webhook-value-row webhook-url-row"><input id="webhookEndpoint" class="webhook-value" type="password" readonly autocomplete="off" spellcheck="false" placeholder="保存设置后生成专属地址" /><button class="btn btn--sm" id="btnRevealWebhookEndpoint" type="button" aria-pressed="false">显示</button><button class="btn btn--sm" id="btnCopyWebhookEndpoint" type="button">复制地址</button></div>
+        <p class="mgroup__note webhook-result" id="webhookCopyNote" role="status" aria-live="polite"></p>
+        <p class="mgroup__note">复制专属地址后，可直接粘贴到外部系统；该地址已包含访问凭证。</p>
+        <p class="mgroup__note" id="webhookLanAddresses" hidden></p>
+        <details class="webhook-advanced"><summary>高级：访问令牌</summary>
+        <label class="webhook-field-label webhook-token-label" for="webhookToken">访问令牌</label>
+        <div class="webhook-value-row webhook-token-row"><input id="webhookToken" class="webhook-value" type="password" readonly autocomplete="off" spellcheck="false" placeholder="保存设置或生成令牌后显示" /><button class="btn btn--sm" id="btnRevealWebhookToken" type="button" aria-pressed="false">显示</button><button class="btn btn--sm" id="btnCopyWebhookToken" type="button">复制令牌</button></div>
+        <div class="webhook-token-footer"><p class="mgroup__note">重新生成后，旧专属地址立即失效。</p><button class="webhook-text-button" id="btnRotateWebhookToken" type="button">生成令牌</button></div>
+        <p class="mgroup__note">也可向 <code>/api/webhook</code> 发送请求，并使用 <code>Authorization: Bearer &lt;令牌&gt;</code> 请求头。</p>
+        </details>
+      </section>
+      <section class="mgroup">
+        <h2 class="mgroup__title">接收设置</h2>
+        <label class="switch"><input type="checkbox" id="webhookEnabled" /><span class="switch__ui"></span><span class="switch__text">开启本机 Webhook 服务</span></label>
+        <div class="webhook-scope-row"><span class="webhook-field-label" id="webhookScopeLabel">访问范围</span>
+          <div class="webhook-scope" role="group" aria-labelledby="webhookScopeLabel">
+            <button id="webhookScopeLocal" type="button" class="is-active" aria-pressed="true">仅本机</button>
+            <button id="webhookScopeLan" type="button" aria-pressed="false">局域网</button>
+          </div>
+        </div>
+        <p class="mgroup__note" id="webhookScopeNote">仅此电脑上的应用和脚本可以访问。</p>
+        <div class="webhook-port-row"><label class="field" for="webhookPort"><span>监听端口</span><input type="number" id="webhookPort" min="1024" max="65535" step="1" value="17891" aria-describedby="webhookConfigNote" /></label></div>
+        <label class="webhook-field-label webhook-public-label" for="webhookPublicBaseUrl">SSH 转发入口 <span>高级选填</span></label>
+        <input class="webhook-public-input" id="webhookPublicBaseUrl" type="url" maxlength="2048" placeholder="https://example.com" autocomplete="off" spellcheck="false" aria-describedby="webhookPublicNote webhookConfigNote" />
+        <p class="mgroup__note" id="webhookPublicNote">填写已经连接到本机的 HTTPS 域名。</p>
+        <div class="webhook-save-row"><button class="btn btn--gold btn--sm" id="btnSaveWebhook" type="button">保存设置</button></div>
+        <p class="mgroup__note webhook-result" id="webhookConfigNote" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="mgroup">
+        <div class="mgroup__heading"><h2 class="mgroup__title">检查连接</h2><button class="btn btn--sm" id="btnTestWebhook" type="button">发送测试消息</button></div>
+        <p class="mgroup__note">通过此电脑上的 HTTP 接口发送，验证访问凭证与消息投递。</p>
+        <p class="mgroup__note webhook-result" id="webhookTestNote" role="status" aria-live="polite"></p>
+      </section>
+      </details>
+      <section class="mgroup webhook-examples">
+        <h2 class="mgroup__title">调用示例</h2>
+        <p class="mgroup__note">将 <code>YOUR_WEBHOOK_URL</code> 替换为复制的专属地址。支持下面的飞书文本消息格式，无需另填请求头凭证。</p>
+        <details class="webhook-example" open><summary>curl <span>macOS / Bash</span></summary><pre id="webhookCurlExample" tabindex="0" aria-label="curl 调用示例"></pre></details>
+        <details class="webhook-example"><summary>PowerShell <span>Windows</span></summary><pre id="webhookPowerShellExample" tabindex="0" aria-label="PowerShell 调用示例"></pre></details>
+        <p class="mgroup__note">外部系统使用上方「服务器连接」中的专属地址；同一电脑或局域网中的应用，也可使用高级接入中的本机地址。</p>
+      </section>
+    </section>
+
+    <section class="panel__scroll panel-page phone-page" id="phonePage" aria-hidden="true" inert>
+      <div class="page-intro"><h1>让手机与电脑保持连接</h1><p>连接 Android 手机，将新消息同步到通知框。</p></div>
+      <p class="mgroup__note" id="phoneSupportNote"></p>
+      <section class="mgroup">
+        <h2 class="mgroup__title">手机同步</h2>
+        <label class="switch"><input type="checkbox" id="phoneEnabled" /><span class="switch__ui"></span><span class="switch__text">开启手机通知同步</span></label>
+        <label class="switch"><input type="checkbox" id="phoneHideContent" /><span class="switch__ui"></span><span class="switch__text">仅显示应用名</span></label>
+        <button class="phone-notification-link" id="btnPhoneNotificationSettings" type="button">调整通知框展示 <span aria-hidden="true">→</span></button>
+        <p class="mgroup__note" id="phoneConfigNote" role="status" aria-live="polite"></p>
+      </section>
+      <section class="mgroup">
+        <div class="mgroup__heading"><div class="mgroup__title">连接设备</div><button class="btn btn--sm" id="btnPhoneScan">扫描设备</button></div>
+        <p class="phone-status" id="phoneStatus" role="status" aria-live="polite"></p>
+        <p class="mgroup__note" id="phoneAccessNote"></p>
+        <ul class="phone-devices" id="phoneDevices"></ul>
+        <button class="btn btn--sm" id="btnPhoneDisconnect" hidden>断开</button>
+        <p class="mgroup__note">断开后忘记此设备，下次需重新连接。</p>
+      </section>
+      <section class="mgroup phone-guide">
+        <h2 class="mgroup__title">首次连接</h2>
+        <ol class="setup-steps">
+          <li><span class="setup-steps__number" aria-hidden="true">1</span><span>手机安装 Android 伴侣，允许通知访问。</span></li>
+          <li><span class="setup-steps__number" aria-hidden="true">2</span><span>在系统蓝牙设置中配对，再在手机端选择这台电脑并开始共享。</span></li>
+          <li><span class="setup-steps__number" aria-hidden="true">3</span><span>点击「扫描设备」并连接。开启「通知框」后，新消息会展示在灵动岛右侧。</span></li>
+        </ol>
+      </section>
+    </section>
     <section class="panel__scroll panel-page task-settings-page" id="taskSettingsPage" aria-hidden="true" inert>
       <div class="task-settings-context"><p class="action-scope" id="actionScope"></p><p class="task-settings-duration" id="taskSettingsDuration"></p></div>
       <section class="mgroup task-duration-editor" aria-labelledby="taskDurationHeading">
@@ -198,6 +366,7 @@
       <p class="mgroup__note task-create-note" id="taskNote" role="status" aria-live="polite"></p>
       <div class="task-create-actions"><button class="btn" id="btnCancelTask">取消</button><button class="btn btn--gold" id="btnAddTask">创建任务</button></div>
     </section>
+    </div>
     </div>
   </div>
 </div>

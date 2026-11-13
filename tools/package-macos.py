@@ -87,6 +87,18 @@ def stage_bundle(binary: Path, payload: Path, app_version: str, architecture: st
 Requires macOS {MIN_MACOS} or later. This package is for {architecture} only.
 Move Focus Island.app to Applications, then open it. The app lives in the menu bar.
 Click the pill to expand it; right-click it to open settings.
+The panel has four sections: Countdown, Webhook, Phone notifications,
+and General settings. Phone forwarding currently requires Windows.
+Under General settings > Notifications, enable message display, set the
+preview duration and list size, or send a test notification.
+The notification companion previews messages for 5 seconds by default, then
+shows their count. Click the count for a list; check a message to dismiss it.
+Webhook accepts generic JSON and Feishu text messages using a private URL or
+Bearer token. It displays notifications only; it never runs tasks or commands.
+Local/LAN requests work directly. For public access, enter your HTTPS server
+address and connection key in Webhook > Server connection. The app connects
+automatically; no local SSH setup is needed. Initial server deployment is
+documented in deploy/relay/README.md in the matching source package.
 Create a task or open that task's settings to configure its completion action.
 Actions default off and belong only to tasks. Free timers never execute commands.
 Available completion actions: Shell command (zsh), sleep, shutdown, and restart.

@@ -1,0 +1,78 @@
+{
+	admin off
+	persist_config off
+	auto_https disable_redirects
+	grace_period 5s
+	# Error logs can contain the credential-bearing request URI.
+	log {
+		exclude http.log.access http.log.error
+	}
+	servers {
+		protocols h1 h2
+		max_header_size 8KiB
+		timeouts {
+			read_header 5s
+			read_body 10s
+			write 15s
+			idle 30s
+		}
+	}
+}
+
+(relay_upstream) {
+	request_body {
+		max_size 16KiB
+	}
+	reverse_proxy relay:17893 {
+		request_buffers 17KiB
+		transport http {
+			versions 1.1
+			dial_timeout 2s
+			response_header_timeout 8s
+			read_timeout 8s
+			write_timeout 5s
+			keepalive off
+		}
+	}
+}
+
+http://{$WEBHOOK_DOMAIN} {
+	log_skip
+	respond "HTTPS required" 400
+}
+
+https://{$WEBHOOK_DOMAIN} {
+	log_skip
+	header {
+		Cache-Control "no-store"
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+	}
+	@delivery {
+		method POST
+		path /api/webhook/*
+	}
+	@reader {
+		method GET
+		path /api/relay/info /api/relay/messages
+	}
+	@ack {
+		method POST
+		path /api/relay/ack
+	}
+	handle @delivery {
+		import relay_upstream
+	}
+	handle @reader {
+		import relay_upstream
+	}
+	handle @ack {
+		import relay_upstream
+	}
+	handle {
+		respond "Not Found" 404
+	}
+	handle_errors {
+		respond "Webhook gateway unavailable" {err.status_code}
+	}
+}

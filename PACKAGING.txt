@@ -1,4 +1,4 @@
-﻿Focus Island · Windows / macOS 工程包
+Focus Island · Windows / macOS 工程包
 
 一、这份工程的状态
 Windows x64 已有本机验证过的便携版。
@@ -86,3 +86,29 @@ Mac 包仅带 ad-hoc 本地签名，未使用 Developer ID、未经过 Apple 公
 https://docs.github.com/en/migrations/importing-source-code/using-the-command-line-to-import-source-code/adding-locally-hosted-code-to-github
 https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts
 https://developer.apple.com/macos/distribution/
+
+Android 通知伴侣（第一版）
+--------------------------
+源码位于 android/，Android 8.0（API 26）起，targetSdk 36。
+Windows 的手机通知模块使用 BLE GATT；macOS 手机接收和 iPhone ANCS 尚未实现。
+本地构建：powershell -ExecutionPolicy Bypass -File .\android\build-local.ps1
+标准构建：进入 android 目录，配置 JDK 17 / Android SDK 后运行 gradlew.bat testDebugUnitTest lintDebug assembleDebug。
+测试 APK：android/app/build/outputs/apk/debug/app-debug.apk。
+本地交付副本：dist/FocusIsland-Companion-android-debug.apk，使用 Android debug 签名供安装联调。
+正式上架或长期自动更新需要自行配置稳定的发布签名；签名文件、SDK、Gradle缓存与local.properties不进入源码包。
+新增 .github/workflows/android.yml，生成 FocusIsland-android-companion 测试包和校验文件；无需仓库写入权限，不发布到应用商店。
+不同构建环境的 debug 签名可能不同，不能保证直接覆盖已有测试安装。
+
+实机验收至少包含：系统配对、指定电脑授权、首次通知、中文和emoji、同通知更新/撤销、任务进行中独立通知岛展示、手动阅读不中断倒计时、手机锁屏、省电策略、蓝牙关闭恢复、手机停止共享、撤销通知权限、电脑休眠恢复。自动化协议/界面测试不替代这些实机步骤。
+Webhook 接入与部署
+--------------------------
+桌面新增“Webhook”菜单：本机/局域网接收、专属地址、飞书文本消息格式、令牌更换及测试消息。
+默认关闭，首次保存生成随机令牌；消息与手机通知共用“通知框”，不执行任务命令。
+功能面板包含倒计时、Webhook、手机通知、通用设置四个顶级菜单；通知框开关、停留时间、列表数量和测试通知统一位于“通用设置 → 通知框”。
+Windows 便携包和完整工程包均包含 deploy/relay 中继部署资料；deploy/webhook 与 tools/webhook-tunnel.ps1 保留为高级转发选项。
+公网服务 https://webhook.tchenmm.online 已上线；在程序中填写该 HTTPS 服务地址与连接密钥即可自动连接，日常不使用 SSH。
+自行部署其他服务器仍需准备 Linux 服务器与域名，按 deploy/relay/README.md 首次安装。
+已完成实际 HTTPS → Windows 桌面通知 → ACK 验收，以及同 ID 消息更新、撤回、停用后恢复接收和应用重启后的待收消息续收验证。
+服务器队列仅存内存；这里的重启续收指桌面应用重启，服务端重启会清空待收消息。
+填写公网基地址本身不会部署服务器。真实 .env、令牌、SSH 私钥、用户配置与测试消息不进入包。
+Mac 接收服务使用跨平台 Rust TCP 实现；本轮完成 macOS ARM/Intel 编译检查，未执行新的 macOS 云端构建；最新 Mac GUI 与公网实机验收仍需对应环境。Android 真机蓝牙验收尚未完成。

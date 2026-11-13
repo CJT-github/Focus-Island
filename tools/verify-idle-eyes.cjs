@@ -20,8 +20,8 @@ async function assertClock(page){
  assert(await page.evaluate(()=>{const d=new Date(),p=n=>String(n).padStart(2,'0');return document.querySelector('#compactTime').textContent===[d.getHours(),d.getMinutes(),d.getSeconds()].map(p).join(':');}),'Clock matches current local hours, minutes, seconds');
 }
 async function headless(){
- const [template,css,app]=await Promise.all(['index.html','styles.css','app.js'].map(file=>fs.readFile(path.join(root,'ui',file),'utf8')));
- const html=(initial=state,geometry={})=>template.replace('/*__CSS__*/',()=>css).replace('__VIEW__','island').replace('/*__GEO__*/',()=>JSON.stringify(geometry)).replace('/*__STATE__*/',()=>JSON.stringify(initial)).replace('/*__JS__*/',()=>app);
+ const [template,css,notifications,app]=await Promise.all(['index.html','styles.css','notifications.js','app.js'].map(file=>fs.readFile(path.join(root,'ui',file),'utf8')));
+ const html=(initial=state,geometry={})=>template.replace('/*__CSS__*/',()=>css).replace('__VIEW__','island').replace('/*__GEO__*/',()=>JSON.stringify(geometry)).replace('/*__STATE__*/',()=>JSON.stringify(initial)).replace('/*__JS__*/',()=>(notifications+'\n'+app));
  const executablePath=process.env.BROWSER_EXE||(process.platform==='win32'?'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe':undefined);
  const browser=await chromium.launch({headless:true,...(executablePath?{executablePath}:{})});
  const report={mode:'headless',checks:[],errors:[]};
@@ -150,6 +150,7 @@ async function native(executable,stateFile){
  }
  async function configureEyes(enabled,showClock){
   await page.locator('#island').click({button:'right',position:{x:170,y:19}});
+  await panel.locator('#btnOpenPreferencesPage').click();
   if(showClock!==undefined&&await panel.locator('#swIdleClock').isChecked()!==showClock)await panel.locator('label:has(#swIdleClock)').click();
   if(await panel.locator('#swEyes').isChecked()!==enabled)await panel.locator('label:has(#swEyes)').click();
   let saved;

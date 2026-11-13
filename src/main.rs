@@ -4,6 +4,9 @@
 mod state;
 mod actions;
 mod window;
+mod phone;
+mod webhook;
+mod relay;
 
 use state::{AppState, CompletionAction, Settings, Task};
 use actions::{ActionController, ExecutionResult, TimerCompletion, TimerUpdate};
@@ -43,6 +46,25 @@ struct TaskDurationRequest {
 enum Command {
     SetShape(bool, u64),
     SetEffect(bool, u64),
+    SetNotificationShape(bool, u64),
+    SetNotificationLayout(window::NotificationLayout, u64),
+    NotificationsConfigure(serde_json::Value),
+    NotificationTest,
+    WebhookConfigure(serde_json::Value, u64),
+    WebhookRotateToken(u64),
+    WebhookStatus,
+    WebhookTest(u64),
+    WebhookTestFinished(u64, Result<String, String>),
+    WebhookEvent(webhook::WebhookEvent),
+    RelayConfigure(serde_json::Value, u64),
+    RelayStatus,
+    RelayEvent(relay::RelayEvent),
+    RelayAcknowledged(relay::RelayEvent),
+    PhoneConfigure(serde_json::Value),
+    PhoneScan,
+    PhoneConnect(String),
+    PhoneDisconnect,
+    PhoneEvent(phone::PhoneEvent),
     SetDuration(u64),
     ToggleTimer,
     ResetTimer,
@@ -75,6 +97,20 @@ fn parse_command(raw: &str) -> Option<Command> {
     Some(match v.get("type")?.as_str()? {
         "setShape" => Command::SetShape(v.get("open")?.as_bool()?, request_id),
         "setEffect" => Command::SetEffect(v.get("active")?.as_bool()?, request_id),
+        "setNotificationShape" => Command::SetNotificationShape(v.get("active")?.as_bool()?, request_id),
+        "setNotificationLayout" => Command::SetNotificationLayout(window::NotificationLayout::from_value(&v)?, request_id),
+        "notificationsConfigure" => Command::NotificationsConfigure(v.get("settings").cloned().unwrap_or(serde_json::Value::Null)),
+        "notificationTest" => Command::NotificationTest,
+        "webhookConfigure" => Command::WebhookConfigure(v.get("settings").cloned().unwrap_or(serde_json::Value::Null), request_id),
+        "webhookRotateToken" => Command::WebhookRotateToken(request_id),
+        "webhookStatus" => Command::WebhookStatus,
+        "relayStatus" => Command::RelayStatus,
+        "relayConfigure" => Command::RelayConfigure(v.get("settings").cloned().unwrap_or(serde_json::Value::Null), request_id),
+        "webhookTest" => Command::WebhookTest(request_id),
+        "phoneConfigure" => Command::PhoneConfigure(v.get("settings").cloned().unwrap_or(serde_json::Value::Null)),
+        "phoneScan" => Command::PhoneScan,
+        "phoneConnect" => Command::PhoneConnect(v.get("address")?.as_str()?.into()),
+        "phoneDisconnect" => Command::PhoneDisconnect,
         "setDuration" => Command::SetDuration(v.get("sec")?.as_u64()?),
         "toggleTimer" => Command::ToggleTimer,
         "resetTimer" => Command::ResetTimer,
@@ -112,7 +148,10 @@ fn parse_command(raw: &str) -> Option<Command> {
 
 fn parse_view_command(raw: &str, island: bool) -> Option<Command> {
     let command = parse_command(raw)?;
-    if !island && matches!(command, Command::TimerState(_) | Command::TimerDone(_)) { return None; }
+    if !island && matches!(command, Command::TimerState(_) | Command::TimerDone(_) | Command::SetNotificationShape(_, _) | Command::SetNotificationLayout(_, _)) { return None; }
+    // Network input never enters IPC; only the settings view may manage credentials.
+    if island && matches!(command, Command::WebhookConfigure(_, _) | Command::WebhookRotateToken(_)
+        | Command::WebhookStatus | Command::WebhookTest(_) | Command::RelayStatus | Command::RelayConfigure(_, _)) { return None; }
     Some(command)
 }
 
@@ -220,6 +259,171 @@ fn cursor_watch_allowed(settings: &Settings, visible: bool, island_open: bool, e
     visible && !island_open && !effect && settings.show_idle_eyes && !settings.reduce_motion
 }
 
+/// Strict UI validation, followed by an atomic save before live preferences change.
+fn configured_phone_state(state: &AppState, value: &serde_json::Value, path: &std::path::Path)
+    -> Result<AppState, String> {
+    let enabled = value.get("enabled").and_then(|v| v.as_bool()).ok_or("请选择是否启用手机通知")?;
+    let seconds = value.get("displaySeconds").and_then(|v| v.as_u64())
+        .filter(|v| (3..=30).contains(v)).ok_or("通知展示时长须为 3–30 秒")?;
+    let hidden = value.get("hideContent").and_then(|v| v.as_bool()).ok_or("请选择通知内容显示方式")?;
+    if enabled && !cfg!(target_os = "windows") { return Err("本版手机通知支持 Windows + Android".into()); }
+    let mut updated = state.clone();
+    updated.phone.enabled = enabled;
+    updated.phone.display_seconds = seconds;
+    updated.phone.hide_content = hidden;
+    updated.save_to_path(path).map_err(|e| format!("保存手机通知设置失败：{}", e))?;
+    Ok(updated)
+}
+
+/// Saving notification preferences cannot affect timer state or source settings.
+fn configured_notifications_state(state: &AppState, value: &serde_json::Value, path: &std::path::Path)
+    -> Result<AppState, String> {
+    let enabled = value.get("enabled").and_then(|v| v.as_bool()).ok_or("请选择是否开启通知框")?;
+    let display_seconds = value.get("displaySeconds").and_then(|v| v.as_u64())
+        .filter(|v| (1..=30).contains(v)).ok_or("消息停留时长须为 1–30 秒的整数")?;
+    let list_limit = value.get("listLimit").and_then(|v| v.as_u64())
+        .filter(|v| (1..=10).contains(v)).ok_or("消息列表数量须为 1–10 条的整数")?;
+    let mut updated = state.clone();
+    updated.notifications = state::NotificationSettings { enabled, display_seconds, list_limit };
+    updated.save_to_path(path).map_err(|e| format!("保存通知框设置失败：{}", e))?;
+    Ok(updated)
+}
+
+
+/// Bind and prepare workers before saving; activation follows a successful atomic save.
+fn configured_webhook_state(state: &AppState, manager: &mut webhook::WebhookManager,
+    value: Option<&serde_json::Value>, path: &std::path::Path) -> Result<AppState, String> {
+    let mut updated = state.clone();
+    if let Some(value) = value {
+        updated.webhook.enabled = value.get("enabled").and_then(|v| v.as_bool()).ok_or("请选择是否开启 Webhook")?;
+        updated.webhook.scope = value.get("scope").and_then(|v| v.as_str())
+            .filter(|v| matches!(*v, "local" | "lan")).ok_or("请选择本机或局域网访问")?.into();
+        updated.webhook.port = value.get("port").and_then(|v| v.as_u64())
+            .filter(|v| (1024..=65535).contains(v)).ok_or("端口须为 1024–65535 之间的整数")? as u16;
+        if let Some(base) = value.get("publicBaseUrl") {
+            updated.webhook.public_base_url = state::normalized_public_base_url(base.as_str().ok_or("公网地址格式不正确")?)
+                .ok_or("公网地址请填写 HTTPS 域名，不包含路径、查询参数或账号信息")?;
+        }
+    }
+    if value.is_none() || !updated.webhook.has_valid_token() {
+        updated.webhook.token = webhook::generate_token()?;
+    }
+    let prepared = manager.prepare(&updated.webhook)?;
+    updated.save_to_path(path).map_err(|e| format!("保存 Webhook 设置失败：{}", e))?;
+    manager.commit(prepared);
+    Ok(updated)
+}
+
+
+fn configured_relay_state(state: &AppState, manager: &mut relay::RelayManager,
+    value: &serde_json::Value, path: &std::path::Path) -> Result<AppState, String> {
+    let mut updated = state.clone();
+    updated.relay.enabled = value.get("enabled").and_then(|v| v.as_bool()).ok_or("请选择是否自动连接服务器")?;
+    updated.relay.service_url = state::normalized_public_base_url(value.get("serviceUrl")
+        .and_then(|v| v.as_str()).ok_or("请填写 HTTPS 服务地址")?)
+        .ok_or("服务地址须为 HTTPS 域名，不能带路径、账号或查询参数")?;
+    let key = match value.get("connectionKey") {
+        None => "",
+        Some(value) => value.as_str().ok_or("连接密钥格式不正确")?.trim(),
+    };
+    if !key.is_empty() { updated.relay.connection_key = key.into(); }
+    else if updated.relay.service_url != state.relay.service_url {
+        if updated.relay.enabled { return Err("更换服务器地址时请重新填写连接密钥".into()); }
+        updated.relay.connection_key.clear();
+    }
+    updated.relay.validate()?;
+    let prepared = manager.prepare(&updated.relay)?;
+    updated.save_to_path(path).map_err(|error| format!("保存服务器连接失败：{}", error))?;
+    manager.commit(prepared);
+    Ok(updated)
+}
+
+fn relay_status_payload(manager: &relay::RelayManager, state: &AppState,
+    startup_error: Option<&str>, include_token: bool, delivery_enabled: bool) -> serde_json::Value {
+    let mut status = serde_json::to_value(manager.status()).expect("relay status serialization");
+    status["settings"] = serde_json::json!({"enabled":state.relay.enabled,"serviceUrl":state.relay.service_url});
+    status["hasConnectionKey"] = serde_json::json!(state.relay.has_valid_key());
+    status["deliveryEnabled"] = serde_json::json!(delivery_enabled);
+    if let Some(error) = startup_error {
+        status["phase"] = serde_json::json!("error");
+        status["message"] = serde_json::json!(error);
+    }
+    if include_token { status["webhookToken"] = serde_json::json!(manager.webhook_token().unwrap_or_default()); }
+    status
+}
+
+fn webhook_status_payload(manager: &webhook::WebhookManager, state: &AppState,
+    startup_error: Option<&str>, include_token: bool, delivery_enabled: bool) -> serde_json::Value {
+    let mut status = serde_json::to_value(manager.status()).expect("webhook status serialization");
+    status["settings"] = serde_json::json!({"enabled":state.webhook.enabled,
+        "scope":state.webhook.scope,"port":state.webhook.port,"publicBaseUrl":state.webhook.public_base_url});
+    status["endpoint"] = serde_json::json!(format!("http://127.0.0.1:{}/api/webhook", state.webhook.port));
+    status["deliveryEnabled"] = serde_json::json!(delivery_enabled);
+    if let Some(message) = startup_error {
+        status["phase"] = serde_json::json!("error");
+        status["message"] = serde_json::json!(message);
+    }
+    // Query the default IPv4 route without sending a packet. Other interfaces may
+    // be entered manually; no public service or network request is contacted.
+    let addresses = if state.webhook.scope == "lan" {
+        std::net::UdpSocket::bind("0.0.0.0:0").ok().and_then(|socket| {
+            socket.connect("192.0.2.1:9").ok()?;
+            let ip = socket.local_addr().ok()?.ip();
+            (!ip.is_loopback() && !ip.is_unspecified()).then(|| ip.to_string())
+        }).into_iter().collect::<Vec<_>>()
+    } else { Vec::new() };
+    status["lanAddresses"] = serde_json::json!(addresses);
+    if include_token { status["token"] = serde_json::json!(state.webhook.token); }
+    status
+}
+
+/// The preview traverses the same authenticated HTTP endpoint as an external caller.
+fn send_webhook_test(settings: &state::WebhookSettings) -> Result<String, String> {
+    use std::io::Read;
+    if !settings.enabled || !settings.has_valid_token() { return Err("请先保存并开启 Webhook 服务".into()); }
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], settings.port));
+    let mut stream = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .map_err(|_| "无法连接 Webhook，请检查服务状态".to_string())?;
+    stream.set_read_timeout(Some(Duration::from_secs(3))).map_err(|_| "无法设置请求超时".to_string())?;
+    stream.set_write_timeout(Some(Duration::from_secs(2))).map_err(|_| "无法设置请求超时".to_string())?;
+    let body = serde_json::to_vec(&serde_json::json!({"msg_type":"text",
+        "content":{"text":"Webhook 连接成功：这条消息通过本机 HTTP 接口送达，可以开始接入外部服务。"}})).unwrap();
+    let header = format!("POST /api/webhook/{} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        settings.token, settings.port, body.len());
+    stream.write_all(header.as_bytes()).and_then(|_| stream.write_all(&body))
+        .map_err(|_| "发送 Webhook 测试失败".to_string())?;
+    let mut response = Vec::new();
+    stream.take(4096).read_to_end(&mut response).map_err(|_| "Webhook 响应超时，请稍后重试".to_string())?;
+    let status = std::str::from_utf8(&response).unwrap_or("").lines().next().unwrap_or("");
+    match status.split_whitespace().nth(1) {
+        Some("200" | "202") => Ok("测试消息已通过 HTTP 送达通知框".into()),
+        Some("401") => Err("令牌已变化，请使用最新令牌重试".into()),
+        Some("429") => Err("请求过于频繁，请稍后重试".into()),
+        Some("503") => Err("通知暂不可用，请开启通知框后重试".into()),
+        _ => Err("Webhook 未接受测试消息，请检查服务状态".into()),
+    }
+}
+
+fn notification_test_payload() -> serde_json::Value {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    serde_json::json!({
+        "type":"posted", "source":"test",
+        "id":format!("preview-{}-{}-{}", std::process::id(), time.as_nanos(), sequence),
+        "app":"通知预览", "title":"这是一条测试消息",
+        "body":"消息会从主岛分离，停留后收起为数量；点击数量可展开消息列表。",
+        "time":time.as_millis() as u64,
+    })
+}
+
+fn active_shape(effect: bool, notification: bool, open: bool,
+    layout: Option<window::NotificationLayout>) -> window::IslandShape {
+    if effect { window::IslandShape::Effect }
+    else if let Some(layout) = layout { window::IslandShape::NotificationLayout(layout) }
+    else if notification { window::IslandShape::Notification }
+    else if open { window::IslandShape::Dial } else { window::IslandShape::Pill }
+}
 static LOG: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 fn log(message: &str) {
     eprintln!("[FocusIsland] {}", message);
@@ -234,7 +438,14 @@ fn log(message: &str) {
 fn state_payload(state: &AppState) -> String {
     // JSON is also embedded in an HTML script element. Escape '<' to keep a task
     // named '</script>' from closing that element on the next launch.
-    serde_json::to_string(state).expect("state serialization").replace('<', "\\u003c")
+    let mut value = serde_json::to_value(state).expect("state serialization");
+    // Credentials only cross into the settings view via an explicit status/result.
+    if let Some(webhook) = value.get_mut("webhook").and_then(|v| v.as_object_mut()) { webhook.remove("token"); }
+    if let Some(relay) = value.get_mut("relay").and_then(|v| v.as_object_mut()) {
+        relay.remove("connectionKey");
+        relay.insert("hasConnectionKey".into(), serde_json::json!(state.relay.has_valid_key()));
+    }
+    serde_json::to_string(&value).expect("state serialization").replace('<', "\\u003c")
 }
 fn push(webview: &WebView, js: &str) {
     if let Err(error) = webview.evaluate_script(js) {
@@ -255,7 +466,7 @@ fn sync_state(state: &AppState, island: &WebView, panel: &WebView, reset: bool) 
 fn build_page(view: &str, state: &AppState, geo: &window::Geometry) -> String {
     include_str!("../ui/index.html")
         .replace("/*__CSS__*/", include_str!("../ui/styles.css"))
-        .replace("/*__JS__*/", &format!("window.__PLATFORM__ = {:?};\n{}", std::env::consts::OS, include_str!("../ui/app.js")))
+        .replace("/*__JS__*/", &format!("window.__PLATFORM__ = {:?};\n{}\n{}", std::env::consts::OS, include_str!("../ui/notifications.js"), include_str!("../ui/app.js")))
         .replace("/*__GEO__*/", &geo.to_json())
         .replace("__VIEW__", view)
         .replace("/*__STATE__*/", &state_payload(state))
@@ -277,7 +488,7 @@ fn build_tray() -> Result<TrayIcon, Box<dyn std::error::Error>> {
         }
     }
     let menu = Menu::new();
-    menu.append(&MenuItem::with_id("settings", "设置…", true, None))?;
+    menu.append(&MenuItem::with_id("settings", "功能面板…", true, None))?;
     menu.append(&MenuItem::with_id("toggle", "显示 / 隐藏灵动岛", true, None))?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&MenuItem::with_id("quit", "退出", true, None))?;
@@ -323,7 +534,7 @@ fn build_application_menu() -> Result<Menu, Box<dyn std::error::Error>> {
     use tray_icon::menu::Submenu;
     let menu = Menu::new();
     let app_menu = Submenu::new("Focus Island", true);
-    app_menu.append(&MenuItem::with_id("settings", "设置…", true, None))?;
+    app_menu.append(&MenuItem::with_id("settings", "功能面板…", true, None))?;
     app_menu.append(&PredefinedMenuItem::separator())?;
     app_menu.append(&MenuItem::with_id("quit", "退出 Focus Island", true, None))?;
     menu.append(&app_menu)?;
@@ -388,7 +599,7 @@ fn main() {
     window::configure_overlay(&island);
     window::resize_to(&island, window::IslandShape::Pill, f64::from(app_state.settings.top_offset));
     let panel = overlay_builder()
-        .with_title("Focus Island 设置")
+        .with_title("Focus Island · 功能面板")
         .with_always_on_top(app_state.settings.always_on_top).with_visible(false)
         .with_inner_size(window::logical_size(window::PANEL_W, window::PANEL_H))
         .build(&event_loop).expect("创建设置浮窗失败");
@@ -435,6 +646,65 @@ fn main() {
     let tray_receiver = TrayIconEvent::receiver().clone();
     let menu_receiver = MenuEvent::receiver().clone();
 
+    let phone_tx = tx.clone();
+    let phone_proxy = event_loop.create_proxy();
+    let phone_manager = phone::PhoneManager::new(move |event| {
+        let _ = phone_tx.send(Command::PhoneEvent(event));
+        let _ = phone_proxy.send_event(());
+    });
+    let mut phone_status = phone_manager.status();
+    let mut phone_requested_address = String::new();
+    // Fresh installs never scan or pair automatically. Only an explicitly saved
+    // enabled device is eligible for reconnecting after a restart.
+    if app_state.phone.enabled && !selftest {
+        phone_manager.configure(true);
+        if let Ok(address) = app_state.phone.device_address.parse::<u64>() {
+            phone_requested_address = address.to_string();
+            phone_manager.connect(address);
+        }
+    }
+
+    let delivery_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let webhook_delivery = delivery_enabled.clone();
+    let webhook_tx = tx.clone();
+    let webhook_proxy = event_loop.create_proxy();
+    let mut webhook_manager = webhook::WebhookManager::new(move |event| {
+        if !webhook_delivery.load(std::sync::atomic::Ordering::Acquire) { return false; }
+        if webhook_tx.send(Command::WebhookEvent(event)).is_err() { return false; }
+        let _ = webhook_proxy.send_event(());
+        true
+    });
+    let mut webhook_startup_error: Option<String> = None;
+    if app_state.webhook.enabled && !selftest {
+        match webhook_manager.prepare(&app_state.webhook) {
+            Ok(prepared) => { webhook_manager.commit(prepared); }
+            Err(message) => { webhook_startup_error = Some(message); log("Webhook 启动失败，请在功能面板查看状态"); }
+        }
+    }
+
+    let relay_tx = tx.clone();
+    let relay_proxy = event_loop.create_proxy();
+    let mut relay_manager = relay::RelayManager::new(move |event| {
+        if relay_tx.send(Command::RelayEvent(event)).is_err() { return false; }
+        let _ = relay_proxy.send_event(());
+        true
+    }, delivery_enabled.clone());
+    let mut relay_startup_error: Option<String> = None;
+    if app_state.relay.enabled && !selftest {
+        match relay_manager.prepare(&app_state.relay) {
+            Ok(prepared) => { relay_manager.commit(prepared); }
+            Err(message) => { relay_startup_error = Some(message); log("服务器连接启动失败，请在功能面板查看状态"); }
+        }
+    }
+    let relay_ack_proxy = event_loop.create_proxy();
+    let mut last_relay_status = serde_json::Value::Null;
+
+    let webhook_test_proxy = event_loop.create_proxy();
+    let mut last_webhook_status = serde_json::Value::Null;
+    let mut next_webhook_status = Instant::now();
+
+    let mut notification_open = false;
+    let mut notification_layout: Option<window::NotificationLayout> = None;
     let mut island_open = false;
     let mut effect = false;
     let mut cursor_watch = CursorWatch::default();
@@ -474,7 +744,7 @@ fn main() {
             }
             Event::WindowEvent { event: WindowEvent::ScaleFactorChanged { .. }, window_id, .. } => {
                 if window_id == island.id() {
-                    window::resize_to(&island, if effect { window::IslandShape::Effect } else if island_open { window::IslandShape::Dial } else { window::IslandShape::Pill }, f64::from(app_state.settings.top_offset));
+                    window::resize_to(&island, active_shape(effect, notification_open, island_open, notification_layout), f64::from(app_state.settings.top_offset));
                     window::fit_webview(&island_webview, &island);
                 } else if window_id == panel.id() {
                     window::keep_panel_visible(&panel);
@@ -507,7 +777,9 @@ fn main() {
         }
         while let Ok(cmd) = rx.try_recv() {
             if verbose && !matches!(cmd, Command::TimerState(_) | Command::TimerDone(_)
-                | Command::SetCompletionAction(_, _) | Command::AddTask(_)) {
+                | Command::SetCompletionAction(_, _) | Command::AddTask(_) | Command::PhoneEvent(_)
+                | Command::WebhookConfigure(_, _) | Command::WebhookEvent(_)
+                | Command::RelayConfigure(_, _) | Command::RelayEvent(_) | Command::RelayAcknowledged(_)) {
                 log(&format!("收到命令: {:?}", cmd));
             }
             let mut changed = false;
@@ -520,10 +792,18 @@ fn main() {
                     push(target, &format!("window.__applyState({},false);", state_payload(&app_state)));
                     if i == 1 { push(target, &format!("window.__applyTimer({});", timer_state)); }
                     push_callback(target, "__actionStatus", completion_actions.status());
+                    push_callback(target, "__phoneStatus", &phone_status);
+                    delivery_enabled.store(ready[0] && app_state.notifications.enabled, std::sync::atomic::Ordering::Release);
+                    if i == 1 { push_callback(target, "__relayStatus", &relay_status_payload(&relay_manager,
+                        &app_state, relay_startup_error.as_deref(), true, ready[0] && app_state.notifications.enabled)); }
+                    if i == 1 { push_callback(target, "__webhookStatus", &webhook_status_payload(&webhook_manager,
+                        &app_state, webhook_startup_error.as_deref(), true, ready[0] && app_state.notifications.enabled)); }
                 }
                 Command::SetShape(open, request_id) => {
+                    notification_open = false;
                     island_open = open;
-                    let resized = window::resize_to(&island, if effect { window::IslandShape::Effect } else if open { window::IslandShape::Dial } else { window::IslandShape::Pill }, f64::from(app_state.settings.top_offset));
+                    notification_layout = notification_layout.map(|layout| layout.with_main_open(open));
+                    let resized = window::resize_to(&island, active_shape(effect, notification_open, island_open, notification_layout), f64::from(app_state.settings.top_offset));
                     if resized && window::fit_webview(&island_webview, &island) {
                         acknowledge_viewport(&island_webview, request_id);
                     } else {
@@ -536,6 +816,8 @@ fn main() {
                     }
                 }
                 Command::SetEffect(active, request_id) => {
+                    notification_open = false;
+                    notification_layout = None;
                     effect = active;
                     // Widen the native region for fragments without resizing the
                     // stable WebView surface or moving its screen-space origin.
@@ -547,7 +829,228 @@ fn main() {
                         log("SetEffect: 窗口视口调整失败");
                     }
                 }
-                Command::SetDuration(sec) => {
+                Command::SetNotificationShape(active, request_id) => {
+                    notification_layout = None;
+                    notification_open = active && !effect;
+                    let resized = window::resize_to(&island, active_shape(effect, notification_open, island_open, notification_layout),
+                        f64::from(app_state.settings.top_offset));
+                    if resized && window::fit_webview(&island_webview, &island) {
+                        acknowledge_viewport(&island_webview, request_id);
+                    }
+                    if notification_open { cursor_watch.set_enabled(false, Instant::now()); }
+                }
+                Command::SetNotificationLayout(layout, request_id) => {
+                    notification_open = false;
+                    notification_layout = if effect || layout.mode == window::NotificationMode::None {
+                        None
+                    } else { Some(layout) };
+                    let resized = window::resize_to(&island,
+                        active_shape(effect, notification_open, island_open, notification_layout),
+                        f64::from(app_state.settings.top_offset));
+                    if resized && window::fit_webview(&island_webview, &island) {
+                        acknowledge_viewport(&island_webview, request_id);
+                    } else { log("SetNotificationLayout: 窗口视口调整失败"); }
+                }
+                Command::NotificationsConfigure(value) => {
+                    let (ok, message) = match configured_notifications_state(&app_state, &value, &path) {
+                        Ok(updated) => {
+                            app_state = updated;
+                            delivery_enabled.store(ready[0] && app_state.notifications.enabled, std::sync::atomic::Ordering::Release);
+                            sync_state(&app_state, &island_webview, &panel_webview, false);
+                            (true, "通知框设置已保存".to_string())
+                        }
+                        Err(message) => (false, message),
+                    };
+                    let result = serde_json::json!({"ok":ok,"message":message,"settings":app_state.notifications});
+                    push_callback(&island_webview, "__notificationsConfigResult", &result);
+                    push_callback(&panel_webview, "__notificationsConfigResult", &result);
+                }
+                Command::NotificationTest => {
+                    // The preview uses the common source adapter without touching
+                    // Bluetooth, timer actions, the disk or notification logs.
+                    push_callback(&island_webview, "__notificationEvent", &notification_test_payload());
+                }
+
+
+                Command::RelayStatus => {
+                    push_callback(&panel_webview, "__relayStatus", &relay_status_payload(&relay_manager,
+                        &app_state, relay_startup_error.as_deref(), true, ready[0] && app_state.notifications.enabled));
+                }
+                Command::RelayConfigure(value, request_id) => {
+                    let (ok, message) = match configured_relay_state(&app_state, &mut relay_manager, &value, &path) {
+                        Ok(updated) => {
+                            app_state = updated; relay_startup_error = None;
+                            sync_state(&app_state, &island_webview, &panel_webview, false);
+                            (true, "服务器连接设置已保存".to_string())
+                        }
+                        Err(message) => (false, message),
+                    };
+                    let mut status = relay_status_payload(&relay_manager, &app_state,
+                        relay_startup_error.as_deref(), true, ready[0] && app_state.notifications.enabled);
+                    status["ok"] = serde_json::json!(ok);
+                    status["requestId"] = serde_json::json!(request_id);
+                    status["message"] = serde_json::json!(message);
+                    push_callback(&panel_webview, "__relayConfigResult", &status);
+                    push_callback(&panel_webview, "__relayStatus", &relay_status_payload(&relay_manager,
+                        &app_state, relay_startup_error.as_deref(), true, ready[0] && app_state.notifications.enabled));
+                    next_webhook_status = Instant::now();
+                }
+                Command::RelayEvent(event) => {
+                    if ready[0] && app_state.notifications.enabled && relay_manager.is_current(&event) {
+                        let payload = serde_json::json!({"deliveryId":event.delivery_id,"notification":event.notification});
+                        let json = serde_json::to_string(&payload).expect("relay message serialization").replace('<', "\\u003c");
+                        let script = format!("Boolean(window.__relayNotification && window.__relayNotification({}));", json);
+                        let result_tx = tx.clone();
+                        let result_proxy = relay_ack_proxy.clone();
+                        // ACK only after the island reports that it accepted this delivery.
+                        if island_webview.evaluate_script_with_callback(&script, move |result| {
+                            if result.trim() == "true" {
+                                let _ = result_tx.send(Command::RelayAcknowledged(event.clone()));
+                                let _ = result_proxy.send_event(());
+                            }
+                        }).is_err() { log("服务器消息暂未送入页面，将等待重试"); }
+                    }
+                }
+                Command::RelayAcknowledged(event) => {
+                    if ready[0] && app_state.notifications.enabled && relay_manager.is_current(&event) {
+                        relay_manager.acknowledge(&event);
+                    }
+                }
+
+                Command::WebhookStatus => {
+                    push_callback(&panel_webview, "__webhookStatus", &webhook_status_payload(&webhook_manager,
+                        &app_state, webhook_startup_error.as_deref(), true, ready[0] && app_state.notifications.enabled));
+                }
+                Command::WebhookConfigure(_, _) | Command::WebhookRotateToken(_) => {
+                    let (value, request_id) = match &cmd {
+                        Command::WebhookConfigure(value, id) => (Some(value), *id),
+                        Command::WebhookRotateToken(id) => (None, *id),
+                        _ => unreachable!(),
+                    };
+                    let (ok, message) = match configured_webhook_state(&app_state, &mut webhook_manager, value, &path) {
+                        Ok(updated) => {
+                            app_state = updated; webhook_startup_error = None;
+                            sync_state(&app_state, &island_webview, &panel_webview, false);
+                            (true, if value.is_none() { "专属地址已更新，旧地址与令牌立即失效".to_string() } else { "Webhook 设置已保存".to_string() })
+                        }
+                        Err(message) => (false, message),
+                    };
+                    let mut status = webhook_status_payload(&webhook_manager, &app_state,
+                        webhook_startup_error.as_deref(), true, ready[0] && app_state.notifications.enabled);
+                    status["ok"] = serde_json::json!(ok);
+                    status["requestId"] = serde_json::json!(request_id);
+                    status["message"] = serde_json::json!(message);
+                    push_callback(&panel_webview, "__webhookConfigResult", &status);
+                    next_webhook_status = Instant::now();
+                }
+                Command::WebhookEvent(event) => {
+                    if ready[0] && app_state.notifications.enabled && webhook_manager.is_current(&event) {
+                        push_callback(&island_webview, "__notificationEvent", &event.notification);
+                    }
+                }
+                Command::WebhookTest(request_id) => {
+                    let settings = app_state.webhook.clone();
+                    let result_tx = tx.clone();
+                    let result_proxy = webhook_test_proxy.clone();
+                    let spawned = std::thread::Builder::new().name("webhook-test".into()).spawn(move || {
+                        let result = send_webhook_test(&settings);
+                        let _ = result_tx.send(Command::WebhookTestFinished(request_id, result));
+                        let _ = result_proxy.send_event(());
+                    });
+                    if spawned.is_err() {
+                        push_callback(&panel_webview, "__webhookTestResult", &serde_json::json!({
+                            "ok":false,"message":"无法启动测试请求，请稍后重试","requestId":request_id}));
+                    }
+                }
+                Command::WebhookTestFinished(request_id, result) => {
+                    let ok = result.is_ok();
+                    let message = result.unwrap_or_else(|message| message);
+                    push_callback(&panel_webview, "__webhookTestResult", &serde_json::json!({"ok":ok,"message":message,"requestId":request_id}));
+                }
+
+                Command::PhoneConfigure(value) => {
+                    let was_enabled = app_state.phone.enabled;
+                    let result = configured_phone_state(&app_state, &value, &path);
+                    let (ok, message) = match result {
+                        Ok(updated) => {
+                            app_state = updated;
+                            if was_enabled != app_state.phone.enabled {
+                                phone_manager.configure(app_state.phone.enabled);
+                                phone_requested_address.clear();
+                                if app_state.phone.enabled {
+                                    if let Ok(address) = app_state.phone.device_address.parse::<u64>() {
+                                        phone_requested_address = address.to_string();
+                                        phone_manager.connect(address);
+                                    }
+                                }
+                            }
+                            sync_state(&app_state, &island_webview, &panel_webview, false);
+                            (true, "手机通知设置已保存".to_string())
+                        }
+                        Err(message) => (false, message),
+                    };
+                    let result = serde_json::json!({"ok":ok,"message":message,"settings":app_state.phone});
+                    push_callback(&island_webview, "__phoneConfigResult", &result);
+                    push_callback(&panel_webview, "__phoneConfigResult", &result);
+                }
+                Command::PhoneScan => {
+                    if app_state.phone.enabled { phone_manager.scan(); }
+                }
+                Command::PhoneConnect(address) => {
+                    if app_state.phone.enabled {
+                        if let Some(address) = address.parse::<u64>().ok().filter(|v| *v > 0 && *v <= 0xffff_ffff_ffff) {
+                            phone_requested_address = address.to_string();
+                            phone_manager.connect(address);
+                        }
+                    }
+                }
+                Command::PhoneDisconnect => {
+                    phone_requested_address.clear();
+                    phone_manager.disconnect();
+                    let mut updated = app_state.clone();
+                    updated.phone.device_address.clear();
+                    updated.phone.device_name.clear();
+                    match updated.save_to_path(&path) {
+                        Ok(()) => {
+                            app_state = updated;
+                            sync_state(&app_state, &island_webview, &panel_webview, false);
+                        }
+                        Err(_) => {
+                            let result = serde_json::json!({"ok":false,"message":"已断开，但未能保存设备设置，请检查配置目录写入权限","settings":app_state.phone});
+                            push_callback(&panel_webview, "__phoneConfigResult", &result);
+                        }
+                    }
+                }
+                Command::PhoneEvent(event) => match event {
+                    phone::PhoneEvent::Status(status) => {
+                        let selected = !phone_requested_address.is_empty()
+                            && status.device_address == phone_requested_address;
+                        if status.phase == "connected" && (!app_state.phone.enabled || !selected) { continue; }
+                        if status.phase == "connected" && selected && (app_state.phone.device_address != status.device_address
+                            || app_state.phone.device_name != status.device_name) {
+                            let mut updated = app_state.clone();
+                            updated.phone.device_address = status.device_address.clone();
+                            updated.phone.device_name = status.device_name.clone();
+                            updated.phone.normalize();
+                            if updated.save_to_path(&path).is_ok() {
+                                app_state = updated;
+                                sync_state(&app_state, &island_webview, &panel_webview, false);
+                            } else { log("已连接手机，但未能保存设备设置"); }
+                        }
+                        phone_status = status;
+                        push_callback(&island_webview, "__phoneStatus", &phone_status);
+                        push_callback(&panel_webview, "__phoneStatus", &phone_status);
+                    }
+                    phone::PhoneEvent::Notification(mut notification) => {
+                        if app_state.phone.enabled && phone_status.phase == "connected"
+                            && phone_status.notification_access != Some(false)
+                            && phone_status.device_address == phone_requested_address && !phone_requested_address.is_empty() {
+                            // Hide private content before crossing into either WebView.
+                            if app_state.phone.hide_content { notification.title.clear(); notification.body.clear(); }
+                            push_callback(&island_webview, "__phoneNotification", &notification);
+                        }
+                    }
+                },                Command::SetDuration(sec) => {
                     if (1..=state::MAX_DURATION_SEC).contains(&sec) {
                         completion_actions.invalidate("计时时长已修改，本次动作已取消");
                         app_state.duration_sec = sec;
@@ -614,8 +1117,7 @@ fn main() {
                     let top_offset_changed = app_state.settings.top_offset != settings.top_offset;
                     app_state.settings = settings;
                     if top_offset_changed {
-                        let shape = if effect { window::IslandShape::Effect }
-                            else if island_open { window::IslandShape::Dial } else { window::IslandShape::Pill };
+                        let shape = active_shape(effect, notification_open, island_open, notification_layout);
                         if !window::resize_to(&island, shape, f64::from(app_state.settings.top_offset)) {
                             log("TopOffset: 窗口位置调整失败");
                         }
@@ -623,7 +1125,7 @@ fn main() {
                         if verbose { log(&format!("TopOffset ACK: requested={} position={:?}",
                             app_state.settings.top_offset, island.outer_position())); }
                     }
-                    if !cursor_watch_allowed(&app_state.settings, island.is_visible(), island_open, effect) {
+                    if !cursor_watch_allowed(&app_state.settings, island.is_visible(), island_open || notification_open, effect) {
                         cursor_watch.set_enabled(false, Instant::now());
                     }
                     island.set_always_on_top(app_state.settings.always_on_top);
@@ -632,7 +1134,7 @@ fn main() {
                 }
                 Command::WatchCursor(enabled) => {
                     cursor_watch.set_enabled(enabled && cursor_watch_allowed(
-                        &app_state.settings, island.is_visible(), island_open, effect), Instant::now());
+                        &app_state.settings, island.is_visible(), island_open || notification_open, effect), Instant::now());
                 }
                 Command::TimerState(value) => {
                     if let Ok(update) = serde_json::from_value::<TimerUpdate>(value.clone()) {
@@ -712,6 +1214,10 @@ fn main() {
                     log(&format!("FRONTEND ERROR: {}", message));
                 }
                 Command::Quit => {
+                    delivery_enabled.store(false, std::sync::atomic::Ordering::Release);
+                    webhook_manager.shutdown();
+                    relay_manager.shutdown();
+                    phone_manager.configure(false);
                     completion_actions.invalidate("应用退出，本次动作已取消");
                     cursor_watch.set_enabled(false, Instant::now());
                     *control_flow = ControlFlow::Exit;
@@ -722,6 +1228,17 @@ fn main() {
                 app_state.save(&path);
                 sync_state(&app_state, &island_webview, &panel_webview, reset);
             }
+        }
+        delivery_enabled.store(ready[0] && app_state.notifications.enabled
+            && !matches!(*control_flow, ControlFlow::ExitWithCode(_)), std::sync::atomic::Ordering::Release);
+        if ready[1] && Instant::now() >= next_webhook_status {
+            next_webhook_status = Instant::now() + Duration::from_secs(1);
+            let status = webhook_status_payload(&webhook_manager, &app_state, webhook_startup_error.as_deref(), false,
+                ready[0] && app_state.notifications.enabled);
+            if status != last_webhook_status { push_callback(&panel_webview, "__webhookStatus", &status); last_webhook_status = status; }
+            let relay_status = relay_status_payload(&relay_manager, &app_state, relay_startup_error.as_deref(), false,
+                ready[0] && app_state.notifications.enabled);
+            if relay_status != last_relay_status { push_callback(&panel_webview, "__relayStatus", &relay_status); last_relay_status = relay_status; }
         }
         if selftest && !selftest_reported {
             if selftest_stage == 0 && ready.iter().all(|value| *value) {
@@ -739,6 +1256,9 @@ fn main() {
             }
         }
         if matches!(*control_flow, ControlFlow::ExitWithCode(_)) {
+            delivery_enabled.store(false, std::sync::atomic::Ordering::Release);
+            webhook_manager.shutdown();
+            relay_manager.shutdown();
             completion_actions.invalidate("应用退出，本次动作已取消");
         } else if let Some(job) = completion_actions.poll(Instant::now()) {
             let result_tx = tx.clone();
@@ -766,7 +1286,7 @@ fn main() {
         // active 80ms deadline; disabled/hidden eyes have no cursor timer or reads.
         let now = Instant::now();
         if matches!(*control_flow, ControlFlow::ExitWithCode(_))
-            || !cursor_watch_allowed(&app_state.settings, island.is_visible(), island_open, effect) {
+            || !cursor_watch_allowed(&app_state.settings, island.is_visible(), island_open || notification_open, effect) {
             cursor_watch.set_enabled(false, now);
         }
         if cursor_watch.take_due(now) {
@@ -780,7 +1300,7 @@ fn main() {
             *control_flow = ControlFlow::WaitUntil(cursor_deadline.min(tray_deadline));
         }
         window::poll_overlay_hit_test(&island,
-            if effect { window::IslandShape::Effect } else if island_open { window::IslandShape::Dial } else { window::IslandShape::Pill },
+            active_shape(effect, notification_open, island_open, notification_layout),
             island.is_visible());
         let _ = &tray;
         #[cfg(target_os = "macos")]
@@ -804,6 +1324,234 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
             let _ = std::fs::remove_dir(self.0.parent().unwrap());
+        }
+    }
+
+    #[test]
+    fn webhook_ipc_credentials_are_panel_only_and_state_broadcasts_redact_tokens() {
+        let mut state = AppState::default();
+        state.webhook.token = "ab".repeat(32);
+        let public: serde_json::Value = serde_json::from_str(&state_payload(&state)).unwrap();
+        assert!(public["webhook"].get("token").is_none());
+        assert!(!build_page("island", &state, &window::Geometry { scale_factor:1.0,
+            pill_w:window::PILL_W,pill_h:window::PILL_H,dial:window::DIAL }).contains(&state.webhook.token));
+        for kind in ["webhookStatus","webhookTest","webhookRotateToken","webhookConfigure"] {
+            let raw = serde_json::json!({"type":kind,"requestId":44,"settings":{}}).to_string();
+            assert!(parse_view_command(&raw, true).is_none());
+            assert!(parse_view_command(&raw, false).is_some());
+        }
+    }
+
+
+    #[test]
+    fn relay_configuration_keeps_credentials_off_ui_and_preserves_tasks_on_failure() {
+        let file = TaskCreateTestFile::new();
+        let initial = AppState::default();
+        let delivery = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut manager = relay::RelayManager::new(|_| false, delivery);
+        let value = serde_json::json!({"enabled":false,"serviceUrl":"https://hooks.example.com/","connectionKey":"ab".repeat(32)});
+        let saved = configured_relay_state(&initial, &mut manager, &value, &file.0).unwrap();
+        assert_eq!(saved.relay.service_url, "https://hooks.example.com");
+        let public: serde_json::Value = serde_json::from_str(&state_payload(&saved)).unwrap();
+        assert!(public["relay"].get("connectionKey").is_none());
+        assert_eq!(public["relay"]["hasConnectionKey"], true);
+        let mut public_before = serde_json::to_value(&initial).unwrap();
+        public_before["relay"] = serde_json::to_value(&saved.relay).unwrap();
+        assert_eq!(serde_json::to_value(&saved).unwrap(), public_before);
+        for kind in ["relayConfigure","relayStatus"] {
+            let raw = serde_json::json!({"type":kind,"requestId":3,"settings":value}).to_string();
+            assert!(parse_view_command(&raw, true).is_none());
+            assert!(parse_view_command(&raw, false).is_some());
+        }
+        let keep = serde_json::json!({"enabled":false,"serviceUrl":saved.relay.service_url,"connectionKey":""});
+        assert_eq!(configured_relay_state(&saved, &mut manager, &keep, &file.0).unwrap().relay.connection_key, saved.relay.connection_key);
+        let disk = std::fs::read(&file.0).unwrap();
+        for invalid in [
+            serde_json::json!({"enabled":true,"serviceUrl":"https://different.example.com","connectionKey":""}),
+            serde_json::json!({"enabled":false,"serviceUrl":"http://hooks.example.com","connectionKey":""}),
+            serde_json::json!({"enabled":false,"serviceUrl":saved.relay.service_url,"connectionKey":"bad"}),
+            serde_json::json!({"enabled":"true","serviceUrl":saved.relay.service_url}),
+        ] {
+            assert!(configured_relay_state(&saved, &mut manager, &invalid, &file.0).is_err());
+            assert_eq!(std::fs::read(&file.0).unwrap(), disk);
+        }
+        let changed = serde_json::json!({"enabled":false,"serviceUrl":"https://different.example.com","connectionKey":""});
+        assert!(configured_relay_state(&saved, &mut manager, &changed, file.0.parent().unwrap()).is_err());
+        assert_eq!(std::fs::read(&file.0).unwrap(), disk);
+        let cleared = configured_relay_state(&saved, &mut manager, &changed, &file.0).unwrap();
+        assert!(cleared.relay.connection_key.is_empty());
+        manager.shutdown();
+    }
+
+    #[test]
+    fn webhook_configuration_is_atomic_strict_and_separate_from_tasks() {
+        let file = TaskCreateTestFile::new();
+        let initial = AppState::default();
+        let before = serde_json::to_value(&initial).unwrap();
+        let mut manager = webhook::WebhookManager::new(|_| false);
+        let value = serde_json::json!({"enabled":false,"scope":"local","port":17891,"publicBaseUrl":"https://hooks.example.com/"});
+        let saved = configured_webhook_state(&initial, &mut manager, Some(&value), &file.0).unwrap();
+        assert!(saved.webhook.has_valid_token());
+        assert_eq!(saved.webhook.public_base_url, "https://hooks.example.com");
+        let mut actual = serde_json::to_value(&saved).unwrap();
+        actual["webhook"] = before["webhook"].clone();
+        assert_eq!(actual, before);
+        let bytes = std::fs::read(&file.0).unwrap();
+        let bad_values = [serde_json::json!(null),serde_json::json!({}),
+            serde_json::json!({"enabled":true,"scope":"internet","port":17891}),
+            serde_json::json!({"enabled":false,"scope":"local","port":80}),
+            serde_json::json!({"enabled":false,"scope":"local","port":65536}),
+            serde_json::json!({"enabled":false,"scope":"local","port":17891.5}),
+            serde_json::json!({"enabled":false,"scope":"local","port":17891,"publicBaseUrl":"http://hooks.example.com"}),
+            serde_json::json!({"enabled":false,"scope":"local","port":17891,"publicBaseUrl":"https://hooks.example.com/secret"})];
+        for value in &bad_values {
+            assert!(configured_webhook_state(&saved, &mut manager, Some(value), &file.0).is_err());
+            assert_eq!(std::fs::read(&file.0).unwrap(), bytes);
+        }
+        assert!(configured_webhook_state(&saved, &mut manager, None, file.0.parent().unwrap()).is_err());
+        assert_eq!(std::fs::read(&file.0).unwrap(), bytes);
+        let rotated = configured_webhook_state(&saved, &mut manager, None, &file.0).unwrap();
+        assert_ne!(rotated.webhook.token, saved.webhook.token);
+        assert_eq!(rotated.webhook.public_base_url, saved.webhook.public_base_url);
+        assert_eq!(rotated.tasks[0].id, saved.tasks[0].id);
+        assert_eq!(manager.status().phase, "disabled");
+    }
+
+    #[test]
+    fn notification_configuration_is_strict_atomic_and_preserves_all_other_state() {
+        let file = TaskCreateTestFile::new();
+        let (mut state, mut actions) = task_duration_pending_action();
+        state.phone.enabled = true;
+        state.phone.device_address = "12345".into();
+        state.phone.device_name = "paired".into();
+        state.duration_sec = 71;
+        let action_before = actions.status().clone();
+        let before = serde_json::to_value(&state).unwrap();
+        for (display_seconds, list_limit) in [(1, 1), (30, 10), (5, 5)] {
+            let updated = configured_notifications_state(&state, &serde_json::json!({
+                "enabled":true,"displaySeconds":display_seconds,"listLimit":list_limit,
+                "duration_sec":10,"phone":{"enabled":false},"tasks":[]}), &file.0).unwrap();
+            assert_eq!(updated.notifications.display_seconds, display_seconds);
+            assert_eq!(updated.notifications.list_limit, list_limit);
+            let mut after = serde_json::to_value(&updated).unwrap();
+            after["notifications"] = before["notifications"].clone();
+            assert_eq!(after, before);
+            assert_eq!(actions.status(), &action_before);
+            assert_eq!(serde_json::to_value(AppState::load(&file.0)).unwrap(),
+                serde_json::to_value(&updated).unwrap());
+        }
+        let saved = std::fs::read(&file.0).unwrap();
+        for value in [
+            serde_json::json!({}), serde_json::json!(null),
+            serde_json::json!({"enabled":"true","displaySeconds":5,"listLimit":5}),
+            serde_json::json!({"enabled":true,"displaySeconds":0,"listLimit":5}),
+            serde_json::json!({"enabled":true,"displaySeconds":31,"listLimit":5}),
+            serde_json::json!({"enabled":true,"displaySeconds":5.5,"listLimit":5}),
+            serde_json::json!({"enabled":true,"displaySeconds":"5","listLimit":5}),
+            serde_json::json!({"enabled":true,"displaySeconds":5,"listLimit":0}),
+            serde_json::json!({"enabled":true,"displaySeconds":5,"listLimit":11}),
+            serde_json::json!({"enabled":true,"displaySeconds":5,"listLimit":2.5}),
+            serde_json::json!({"enabled":true,"displaySeconds":5,"listLimit":null}),
+        ] {
+            assert!(configured_notifications_state(&state, &value, &file.0).is_err());
+            assert_eq!(std::fs::read(&file.0).unwrap(), saved);
+            assert_eq!(serde_json::to_value(&state).unwrap(), before);
+        }
+        assert!(configured_notifications_state(&state, &serde_json::json!({
+            "enabled":false,"displaySeconds":5,"listLimit":5}), file.0.parent().unwrap()).is_err());
+        assert_eq!(std::fs::read(&file.0).unwrap(), saved);
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
+        // Configuration never invalidated the already pending completion action.
+        assert!(actions.poll(Instant::now()).is_none());
+        assert_eq!(actions.status(), &action_before);
+    }
+
+    #[test]
+    fn notification_layout_ipc_is_bounded_island_only_and_effect_has_priority() {
+        let value = serde_json::json!({"type":"setNotificationLayout","mode":"preview",
+            "mainOpen":true,"listHeight":280,"requestId":99});
+        let Some(Command::SetNotificationLayout(layout, 99)) = parse_view_command(&value.to_string(), true)
+            else { panic!("expected valid layout"); };
+        assert!(parse_view_command(&value.to_string(), false).is_none());
+        assert_eq!(active_shape(false, true, false, Some(layout)), window::IslandShape::NotificationLayout(layout));
+        assert_eq!(active_shape(true, true, false, Some(layout)), window::IslandShape::Effect);
+        for (field, bad) in [("mode", serde_json::json!("arbitrary")),
+            ("mainOpen", serde_json::json!(1)), ("listHeight", serde_json::json!(-1)),
+            ("listHeight", serde_json::json!(281)), ("listHeight", serde_json::json!(12.5))] {
+            let mut invalid = value.clone();
+            invalid[field] = bad;
+            assert!(parse_view_command(&invalid.to_string(), true).is_none());
+        }
+        let list = window::NotificationLayout::from_value(&serde_json::json!({
+            "mode":"list","mainOpen":true,"listHeight":280})).unwrap();
+        assert!(!list.main_open);
+        assert!(!list.with_main_open(true).main_open);
+        assert_eq!(layout.with_main_open(false).mode, window::NotificationMode::Preview);
+        assert!(matches!(parse_command(r#"{"type":"notificationTest"}"#), Some(Command::NotificationTest)));
+        assert!(matches!(parse_command(r#"{"type":"notificationsConfigure"}"#), Some(Command::NotificationsConfigure(_))));
+    }
+
+    #[test]
+    fn preview_notifications_have_unique_ids_and_common_source_without_persisting_content() {
+        let first = notification_test_payload();
+        let second = notification_test_payload();
+        assert_ne!(first["id"], second["id"]);
+        assert_eq!(first["type"], "posted");
+        assert_eq!(first["source"], "test");
+        assert!(first["time"].as_u64().unwrap() > 0);
+        assert!(first["title"].as_str().unwrap().contains("测试消息"));
+        let saved = serde_json::to_value(AppState::default()).unwrap();
+        assert!(saved["notifications"].get("body").is_none());
+        assert!(saved["notifications"].get("messages").is_none());
+    }
+
+    #[test]
+    fn phone_config_is_atomic_and_cannot_replace_timer_or_pairing_identity() {
+        let file = TaskCreateTestFile::new();
+        let mut state = AppState::default();
+        state.phone.device_address = "12345".into();
+        state.phone.device_name = "paired phone".into();
+        let before = serde_json::to_value(&state).unwrap();
+        let updated = configured_phone_state(&state, &serde_json::json!({"enabled":false,
+            "displaySeconds":12,"hideContent":true,"deviceAddress":"9999","deviceName":"untrusted"}), &file.0).unwrap();
+        assert_eq!(updated.phone.device_address, "12345");
+        assert_eq!(updated.phone.display_seconds, 12);
+        let mut after = serde_json::to_value(&updated).unwrap();
+        after["phone"] = before["phone"].clone();
+        assert_eq!(before, after);
+        let saved = std::fs::read(&file.0).unwrap();
+        for seconds in [serde_json::json!(-1), serde_json::json!(31), serde_json::json!(8.5), serde_json::json!("8")] {
+            assert!(configured_phone_state(&updated, &serde_json::json!({"enabled":false,
+                "displaySeconds":seconds,"hideContent":false}), &file.0).is_err());
+            assert_eq!(std::fs::read(&file.0).unwrap(), saved);
+        }
+        assert!(configured_phone_state(&updated, &serde_json::json!({"enabled":false,
+            "displaySeconds":8,"hideContent":true}), file.0.parent().unwrap()).is_err());
+        assert_eq!(std::fs::read(&file.0).unwrap(), saved);
+    }
+    #[test]
+    fn notification_shape_has_explicit_priority_and_only_island_can_change_it() {
+        assert_eq!(active_shape(false, false, false, None), window::IslandShape::Pill);
+        assert_eq!(active_shape(false, false, true, None), window::IslandShape::Dial);
+        assert_eq!(active_shape(false, true, true, None), window::IslandShape::Notification);
+        assert_eq!(active_shape(true, true, true, None), window::IslandShape::Effect);
+        let message = r#"{"type":"setNotificationShape","active":true,"requestId":7}"#;
+        assert!(matches!(parse_view_command(message, true), Some(Command::SetNotificationShape(true, 7))));
+        assert!(parse_view_command(message, false).is_none());
+    }
+    #[test]
+    fn damaged_phone_preferences_do_not_discard_existing_tasks() {
+        let original = AppState::default();
+        for value in [serde_json::json!(null), serde_json::json!(false), serde_json::json!({"enabled":"yes",
+            "displaySeconds":-1,"deviceAddress":"18446744073709551615"})] {
+            let mut json = serde_json::to_value(&original).unwrap();
+            json["phone"] = value;
+            let state: AppState = serde_json::from_value(json).unwrap();
+            assert_eq!(state.current_id, original.current_id);
+            assert_eq!(state.tasks.len(), original.tasks.len());
+            assert!(!state.phone.enabled);
+            assert_eq!(state.phone.display_seconds, 8);
+            assert!(state.phone.device_address.is_empty());
         }
     }
     fn task_request(value: serde_json::Value) -> TaskCreateRequest {

@@ -26,10 +26,24 @@ function Assert-ChildPath([string]$Path, [string]$Parent) {
     return $absolute
 }
 function Assert-RegularFile([string]$Path) {
-    $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw "Expected a regular file: $Path"
     }
+}
+function Assert-SourcePath([string]$Path) {
+    $absolute = Assert-ChildPath $Path $projectRoot
+    $relative = $absolute.Substring($projectRoot.TrimEnd('\').Length + 1)
+    $cursor = $projectRoot
+    $rootItem = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+    if ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Project root must not be a reparse point.' }
+    foreach ($part in $relative.Split(@('\', '/'), [StringSplitOptions]::RemoveEmptyEntries)) {
+        $cursor = Join-Path $cursor $part
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Reparse points are excluded: $cursor" }
+    }
+    Assert-RegularFile $absolute
+    return $absolute
 }
 function Assert-X64Executable([string]$Path) {
     Assert-RegularFile $Path
@@ -112,11 +126,17 @@ https://developer.microsoft.com/microsoft-edge/webview2/
 
 使用
 1. 完整解压 ZIP，再双击 FocusIsland.exe。无需安装应用，也不需要 Rust 开发环境。
-2. 点击屏幕顶部药丸展开圆盘；右键打开设置，拖动设置标题区可移动窗口。
+2. 点击屏幕顶部药丸展开圆盘；右键打开功能面板，拖动顶部标题区可移动窗口。菜单包含倒计时、Webhook、手机通知和通用设置四项。
 3. 在任务列表新增任务，或点击任务行的设置按钮配置该任务的结束动作。
    结束动作默认关闭，仅绑定任务；自由计时不执行命令。
 4. 关闭设置只隐藏窗口；从系统托盘菜单选择“退出”结束程序。
 5. 配置保存在 %APPDATA%\FocusIsland\state.json；移动或更新程序不会删除配置。
+6. 在“通用设置 → 通知框”开关消息展示、配置停留时间与列表数量，或发送测试通知。新消息默认展示 5 秒后收为数量；点击数量查看列表，勾选关闭并自动补位。
+7. 手机通知第一版支持 Windows + Android 8.0 及以上。另行安装 FocusIsland-Companion-android-debug.apk，允许通知访问，与电脑完成系统蓝牙配对，在手机端选择电脑并开始共享，再从本程序“功能面板 → 手机通知”启用并扫描连接。
+   手机消息进入统一通知框，默认展示 5 秒后收为数量，可配置仅应用名。手机真机后台、省电和配对兼容性需实际验证；iPhone 接入尚未实现。
+8. “Webhook”支持专属链接及 Bearer 鉴权，接收通用 JSON 或飞书 text 消息；只展示通知，不执行任务或命令。
+   公网使用“服务器连接”：填写 HTTPS 服务地址与连接密钥后自动接收，不需要本机 SSH。服务器首次安装见 deploy/relay/README.md。
+   本包附 deploy/relay 的完整中继部署资料。本机/局域网接收仍可独立开启；旧 SSH 转发资料在 deploy/webhook。
 
 文件校验
 ZIP 的 SHA256 位于随包提供的 $packageName.sha256 文件。
@@ -133,29 +153,63 @@ Get-FileHash -Algorithm SHA256 .\FocusIsland.exe
             Copy-Item -LiteralPath $licensePath -Destination (Join-Path $payloadPath $licenseName)
         }
     }
-    $contentFiles = @(Get-ChildItem -LiteralPath $payloadPath -File | Sort-Object Name)
-    $manifestLines = @($contentFiles | ForEach-Object {
-        (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $_.Name
-    })
-    [IO.File]::WriteAllLines((Join-Path $payloadPath 'SHA256SUMS.txt'), $manifestLines, $utf8)
+    # Keep deployment paths identical to the source tree so README links work.
+    # Exact allowlist only: never ship deploy/webhook/.env or recurse into deploy.
+    foreach ($relative in @('deploy/webhook/Caddyfile', 'deploy/webhook/compose.yml',
+        'deploy/webhook/README.md', 'deploy/webhook/.env.example', 'tools/webhook-tunnel.ps1',
+        'deploy/relay/server.cjs', 'deploy/relay/server.test.cjs', 'deploy/relay/init.cjs', 'deploy/relay/Dockerfile', 'deploy/relay/compose.yml', 'deploy/relay/Caddyfile', 'deploy/relay/.env.example', 'deploy/relay/.dockerignore', 'deploy/relay/README.md')) {
+        $extraSource = Assert-SourcePath (Join-Path $projectRoot $relative)
+        $extraHash = (Get-FileHash -LiteralPath $extraSource -Algorithm SHA256).Hash.ToLowerInvariant()
+        $destination = Assert-ChildPath (Join-Path $payloadPath $relative) $payloadPath
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        Copy-Item -LiteralPath $extraSource -Destination $destination
+        if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() -ne $extraHash) {
+            throw "Deployment file changed during staging: $relative"
+        }
+    }
+    $payloadPrefix = $payloadPath.TrimEnd('\') + '\'
+    $records = @(
+        Get-ChildItem -LiteralPath $payloadPath -Recurse -Force -File | Sort-Object FullName | ForEach-Object {
+            Assert-RegularFile $_.FullName
+            [PSCustomObject]@{
+                Path = $_.FullName
+                Name = $_.FullName.Substring($payloadPrefix.Length).Replace('\', '/')
+                Hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+        }
+    )
+    $manifestLines = @($records | ForEach-Object { $_.Hash + '  ' + $_.Name })
+    $hashManifest = Join-Path $payloadPath 'SHA256SUMS.txt'
+    [IO.File]::WriteAllLines($hashManifest, $manifestLines, $utf8)
+    $records += [PSCustomObject]@{
+        Path = $hashManifest
+        Name = 'SHA256SUMS.txt'
+        Hash = (Get-FileHash -LiteralPath $hashManifest -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
 
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $temporaryZip = Assert-ChildPath (Join-Path $stagePath $packageName) $stagePath
-    [IO.Compression.ZipFile]::CreateFromDirectory($payloadPath, $temporaryZip, [IO.Compression.CompressionLevel]::Optimal, $false)
+    # Explicit forward slashes avoid .NET Framework's Windows-only ZIP paths.
+    $writer = [IO.Compression.ZipFile]::Open($temporaryZip, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($record in $records) {
+            [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($writer, $record.Path, $record.Name, [IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    } finally { $writer.Dispose() }
     $archive = [IO.Compression.ZipFile]::OpenRead($temporaryZip)
     try {
-        $expectedNames = @($contentFiles.Name) + 'SHA256SUMS.txt'
+        $expectedNames = @($records | ForEach-Object { $_.Name })
         if ($archive.Entries.Count -ne $expectedNames.Count) { throw 'ZIP entry count does not match the staged files.' }
-        foreach ($name in $expectedNames) {
-            $entry = $archive.GetEntry($name)
-            if ($null -eq $entry) { throw "ZIP is missing $name" }
+        foreach ($record in $records) {
+            $entry = $archive.GetEntry($record.Name)
+            if ($null -eq $entry) { throw "ZIP is missing $($record.Name)" }
             $entryStream = $entry.Open()
             $sha = [Security.Cryptography.SHA256]::Create()
             try {
                 $entryHash = [BitConverter]::ToString($sha.ComputeHash($entryStream)).Replace('-', '').ToLowerInvariant()
             } finally { $sha.Dispose(); $entryStream.Dispose() }
-            $stagedHash = (Get-FileHash -LiteralPath (Join-Path $payloadPath $name) -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($entryHash -ne $stagedHash) { throw "ZIP content verification failed: $name" }
+            if ($entryHash -ne $record.Hash) { throw "ZIP content verification failed: $($record.Name)" }
         }
     } finally { $archive.Dispose() }
     $zipHash = (Get-FileHash -LiteralPath $temporaryZip -Algorithm SHA256).Hash.ToLowerInvariant()

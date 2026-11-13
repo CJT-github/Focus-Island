@@ -8,4 +8,6 @@
 *.log
 .env
 .env.*
+!deploy/webhook/.env.example
+!deploy/relay/.env.example
 /state.json

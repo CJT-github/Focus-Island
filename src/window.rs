@@ -18,8 +18,8 @@ pub const EFFECT: f64 = 580.0;
 /// Bounded CSS shadow halo, plus a separate device-pixel GDI rasterization guard.
 const SHADOW_EXTENT: f64 = 6.0;
 const REGION_AA_GUARD: i32 = 3;
-pub const PANEL_W: f64 = 340.0;
-pub const PANEL_H: f64 = 620.0;
+pub const PANEL_W: f64 = 560.0;
+pub const PANEL_H: f64 = 660.0;
 /// Stable shell identity shared by tray-icon and native desktop notifications.
 #[cfg(target_os = "windows")]
 pub const TRAY_GUID: u128 = 0xa53be171_1248_4d97_a865_4b2d17dbb018;
@@ -28,7 +28,34 @@ pub const TRAY_GUID: u128 = 0xa53be171_1248_4d97_a865_4b2d17dbb018;
 pub enum IslandShape {
     Pill,
     Dial,
+    Notification,
+    NotificationLayout(NotificationLayout),
     Effect,
+}
+
+/// Only these bounded layouts can be requested by the island WebView.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationMode { None, Preview, Count, List, Transition }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationLayout {
+    pub mode: NotificationMode,
+    pub main_open: bool,
+    pub list_height: u16,
+}
+impl NotificationLayout {
+    pub fn from_value(value: &serde_json::Value) -> Option<Self> {
+        let mode = match value.get("mode")?.as_str()? {
+            "none" => NotificationMode::None, "preview" => NotificationMode::Preview,
+            "count" => NotificationMode::Count, "list" => NotificationMode::List,
+            "transition" => NotificationMode::Transition, _ => return None,
+        };
+        let main_open = value.get("mainOpen")?.as_bool()?;
+        let list_height = value.get("listHeight")?.as_u64().filter(|height| *height <= 280)? as u16;
+        Some(Self { mode, main_open: main_open && mode != NotificationMode::List, list_height })
+    }
+    pub fn with_main_open(self, open: bool) -> Self {
+        Self { main_open: open && self.mode != NotificationMode::List, ..self }
+    }
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
@@ -91,7 +118,8 @@ fn island_region(shape: IslandShape, scale: f64) -> Option<ClipRegion> {
     let (width, height) = match shape {
         IslandShape::Pill => (PILL_W, PILL_H),
         IslandShape::Dial => (DIAL, DIAL),
-        IslandShape::Effect => return None,
+        IslandShape::Notification => (340.0, 160.0),
+        IslandShape::Effect | IslandShape::NotificationLayout(_) => return None,
     };
     let left = (EFFECT - width) / 2.0;
     let top = (EFFECT - DIAL) / 2.0;
@@ -107,22 +135,83 @@ fn island_region(shape: IslandShape, scale: f64) -> Option<ClipRegion> {
     })
 }
 
+/// Up to three independent rounded regions preserve click-through gaps and
+/// transparent space alongside the dropdown. The same geometry drives macOS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClipRegions([Option<ClipRegion>; 3]);
+impl ClipRegions {
+    #[cfg(target_os = "windows")]
+    fn translated(mut self, dx: i32, dy: i32) -> Self {
+        for region in self.0.iter_mut().flatten() {
+            region.left += dx; region.right += dx;
+            region.top += dy; region.bottom += dy;
+        }
+        self
+    }
+}
+
+fn rounded_region(left: f64, top: f64, width: f64, height: f64, radius: f64, scale: f64) -> ClipRegion {
+    let padding = (SHADOW_EXTENT * scale).ceil() as i32 + REGION_AA_GUARD;
+    let top_px = (top * scale).floor() as i32 - padding;
+    let bottom_px = ((top + height) * scale).ceil() as i32 + padding;
+    ClipRegion {
+        left: (left * scale).floor() as i32 - padding,
+        right: ((left + width) * scale).ceil() as i32 + padding,
+        top: top_px, bottom: bottom_px,
+        corner_diameter: if radius == 0.0 { 0 }
+            else { ((radius * 2.0 * scale).ceil() as i32 + padding * 2).min(bottom_px - top_px) },
+    }
+}
+
+fn island_regions(shape: IslandShape, scale: f64) -> Option<ClipRegions> {
+    let IslandShape::NotificationLayout(layout) = shape else {
+        return island_region(shape, scale).map(|region| ClipRegions([Some(region), None, None]));
+    };
+    if layout.mode == NotificationMode::None {
+        return island_regions(if layout.main_open { IslandShape::Dial } else { IslandShape::Pill }, scale);
+    }
+    if layout.mode == NotificationMode::Transition {
+        return Some(ClipRegions([Some(ClipRegion {
+            left: (3.0 * scale).floor() as i32, top: (111.0 * scale).floor() as i32,
+            right: (577.0 * scale).ceil() as i32, bottom: (469.0 * scale).ceil() as i32,
+            corner_diameter: 0,
+        }), None, None]));
+    }
+    let main_open = layout.main_open && layout.mode != NotificationMode::List;
+    let main_width = if main_open { DIAL } else { PILL_W };
+    let companion_width = if layout.mode == NotificationMode::Preview {
+        if main_open { 196.0 } else { 280.0 }
+    } else { 44.0 };
+    // Twenty logical pixels leave a true gap after both shadow/AA halos.
+    let gap = 20.0;
+    let left = (EFFECT - main_width - gap - companion_width) / 2.0;
+    let main = rounded_region(left, 120.0, main_width,
+        if main_open { DIAL } else { PILL_H }, if main_open { 0.0 } else { 19.0 }, scale);
+    let companion = rounded_region(left + main_width + gap, 120.0, companion_width, PILL_H, 19.0, scale);
+    let list = (layout.mode == NotificationMode::List && layout.list_height > 0).then(|| {
+        rounded_region(100.0, 170.0, 380.0, f64::from(layout.list_height.min(280)), 18.0, scale)
+    });
+    Some(ClipRegions([Some(main), Some(companion), list]))
+}
+
 /// Match the visible island and its bounded shadow, never the empty backing canvas.
 /// The expanded rectangle deliberately contains the entire pill-to-dial morph.
 #[cfg(any(target_os = "macos", test))]
 fn island_hit_test(shape: IslandShape, x: f64, y: f64, scale: f64) -> bool {
     if !x.is_finite() || !y.is_finite() || !scale.is_finite() || scale <= 0.0 { return false; }
-    let Some(region) = island_region(shape, scale) else {
+    let Some(regions) = island_regions(shape, scale) else {
         return (0.0..EFFECT).contains(&x) && (0.0..EFFECT).contains(&y);
     };
     let (x, y) = (x * scale, y * scale);
-    if x < region.left as f64 || x >= region.right as f64
-        || y < region.top as f64 || y >= region.bottom as f64 { return false; }
-    if region.corner_diameter == 0 { return true; }
-    let radius = region.corner_diameter as f64 / 2.0;
-    let center_x = x.clamp(region.left as f64 + radius, region.right as f64 - radius);
-    let center_y = (region.top + region.bottom) as f64 / 2.0;
-    (x - center_x).powi(2) + (y - center_y).powi(2) <= radius.powi(2)
+    regions.0.iter().flatten().any(|region| {
+        if x < region.left as f64 || x >= region.right as f64
+            || y < region.top as f64 || y >= region.bottom as f64 { return false; }
+        if region.corner_diameter == 0 { return true; }
+        let radius = region.corner_diameter as f64 / 2.0;
+        let center_x = x.clamp(region.left as f64 + radius, region.right as f64 - radius);
+        let center_y = y.clamp(region.top as f64 + radius, region.bottom as f64 - radius);
+        (x - center_x).powi(2) + (y - center_y).powi(2) <= radius.powi(2)
+    })
 }
 
 /// Keep island-originated drags alive outside the shape, and never intercept a
@@ -183,7 +272,7 @@ pub fn resize_to(window: &Window, shape: IslandShape, top_offset: f64) -> bool {
     #[cfg(target_os = "windows")]
     {
         if geometry_changed && !native::move_resize(window, position, desired_outer) { return false; }
-        native::apply_region(window, island_region(shape, scale))
+        native::apply_region(window, island_regions(shape, scale))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -351,7 +440,7 @@ pub fn logical_size(w: f64, h: f64) -> LogicalSize<f64> { LogicalSize::new(w, h)
 
 #[cfg(target_os = "windows")]
 mod native {
-    use super::{ClipRegion, PhysicalPosition, PhysicalSize, ScreenRect, Window};
+    use super::{ClipRegion, ClipRegions, PhysicalPosition, PhysicalSize, ScreenRect, Window};
     use std::cell::Cell;
     use tao::platform::windows::WindowExtWindows;
 
@@ -387,6 +476,7 @@ mod native {
         fn CreateRectRgn(left: i32, top: i32, right: i32, bottom: i32) -> isize;
         fn CreateRoundRectRgn(left: i32, top: i32, right: i32, bottom: i32, ellipse_width: i32, ellipse_height: i32) -> isize;
         fn DeleteObject(object: isize) -> i32;
+        fn CombineRgn(destination: isize, source1: isize, source2: isize, mode: i32) -> i32;
         #[cfg(test)]
         fn PtInRegion(region: isize, x: i32, y: i32) -> i32;
     }
@@ -400,7 +490,7 @@ mod native {
     thread_local! {
         // Only the island uses a region. Clear this cache when an HWND is
         // configured so a future reused handle cannot inherit an old key.
-        static APPLIED_REGION: Cell<Option<(isize, Option<ClipRegion>)>> = const { Cell::new(None) };
+        static APPLIED_REGION: Cell<Option<(isize, Option<ClipRegions>)>> = const { Cell::new(None) };
     }
 
     pub fn forget_region(window: &Window) {
@@ -409,30 +499,44 @@ mod native {
         });
     }
 
-    pub fn apply_region(window: &Window, region: Option<ClipRegion>) -> bool {
-        // SetWindowRgn coordinates use the outer window, not its client area.
-        let region = if let Some(mut region) = region {
+    fn create_region(region: ClipRegion) -> isize {
+        unsafe {
+            if region.corner_diameter > 0 {
+                CreateRoundRectRgn(region.left, region.top, region.right, region.bottom,
+                    region.corner_diameter, region.corner_diameter)
+            } else { CreateRectRgn(region.left, region.top, region.right, region.bottom) }
+        }
+    }
+
+    fn create_union(regions: ClipRegions) -> Option<isize> {
+        let union = unsafe { CreateRectRgn(0, 0, 0, 0) };
+        if union == 0 { return None; }
+        for region in regions.0.into_iter().flatten() {
+            let part = create_region(region);
+            if part == 0 {
+                unsafe { let _ = DeleteObject(union); }
+                return None;
+            }
+            let result = unsafe { CombineRgn(union, union, part, 2) }; // RGN_OR
+            unsafe { let _ = DeleteObject(part); }
+            if result == 0 {
+                unsafe { let _ = DeleteObject(union); }
+                return None;
+            }
+        }
+        Some(union)
+    }
+
+    pub fn apply_region(window: &Window, regions: Option<ClipRegions>) -> bool {
+        // SetWindowRgn uses outer coordinates. Translate every independent part.
+        let regions = if let Some(regions) = regions {
             let (Ok(outer), Ok(inner)) = (window.outer_position(), window.inner_position()) else { return false; };
-            let dx = inner.x - outer.x;
-            let dy = inner.y - outer.y;
-            region.left += dx; region.right += dx;
-            region.top += dy; region.bottom += dy;
-            Some(region)
+            Some(regions.translated(inner.x - outer.x, inner.y - outer.y))
         } else { None };
-        let key = (window.hwnd(), region);
+        let key = (window.hwnd(), regions);
         if APPLIED_REGION.with(|cache| cache.get() == Some(key)) { return true; }
-        // A null region restores the complete effect canvas. The parent region
-        // also clips WebView child HWNDs and excludes its exterior from hit tests.
-        let handle = if let Some(region) = region {
-            let handle = unsafe {
-                if region.corner_diameter > 0 {
-                    CreateRoundRectRgn(region.left, region.top, region.right, region.bottom,
-                        region.corner_diameter, region.corner_diameter)
-                } else {
-                    CreateRectRgn(region.left, region.top, region.right, region.bottom)
-                }
-            };
-            if handle == 0 { return false; }
+        let handle = if let Some(regions) = regions {
+            let Some(handle) = create_union(regions) else { return false; };
             handle
         } else { 0 };
         let applied = unsafe { SetWindowRgn(window.hwnd(), handle, 1) != 0 };
@@ -589,6 +693,27 @@ mod native {
             }
         }
         #[test]
+        fn native_union_has_real_transparent_gaps_and_rounded_dropdown_corners() {
+            use super::super::{island_regions, IslandShape, NotificationLayout, NotificationMode};
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                let shape = IslandShape::NotificationLayout(NotificationLayout {
+                    mode: NotificationMode::List, main_open: false, list_height: 280,
+                });
+                let regions = island_regions(shape, scale).unwrap();
+                let list = regions.0[2].unwrap();
+                let union = create_union(regions).unwrap();
+                let point = |x: f64, y: f64| unsafe {
+                    PtInRegion(union, (x * scale).round() as i32, (y * scale).round() as i32) != 0
+                };
+                assert!(point(258.0, 139.0) && point(366.0, 139.0) && point(290.0, 300.0));
+                assert!(!point(334.0, 139.0));
+                assert!(!point(70.0, 300.0) && !point(510.0, 300.0));
+                assert_eq!(unsafe { PtInRegion(union, list.left, list.top) }, 0);
+                unsafe { let _ = DeleteObject(union); }
+            }
+        }
+
+        #[test]
         fn notification_abi_matches_windows_sdk() {
             assert_eq!(std::mem::size_of::<NotifyIconData>(), if cfg!(target_pointer_width = "64") { 976 } else { 956 });
             assert_eq!(std::mem::size_of::<MonitorInfo>(), 40);
@@ -599,6 +724,67 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn composite_layouts_stay_centered_and_keep_the_gap_click_through_across_dpi() {
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 3.0] {
+            for (mode, main_open, left, main_width, companion_width) in [
+                (NotificationMode::Preview, false, 74.0, 132.0, 280.0),
+                (NotificationMode::Preview, true, 12.0, 340.0, 196.0),
+                (NotificationMode::Count, false, 192.0, 132.0, 44.0),
+                (NotificationMode::Count, true, 88.0, 340.0, 44.0),
+            ] {
+                let shape = IslandShape::NotificationLayout(NotificationLayout { mode, main_open, list_height: 0 });
+                assert_eq!((left + left + main_width + 20.0 + companion_width) / 2.0, 290.0);
+                assert!(island_hit_test(shape, left + main_width / 2.0, 139.0, scale));
+                assert!(island_hit_test(shape, left + main_width + 20.0 + companion_width / 2.0, 139.0, scale));
+                assert!(!island_hit_test(shape, left + main_width + 10.0, 139.0, scale),
+                    "gap blocked: {mode:?}, open={main_open}, dpi={scale}");
+                assert!(!island_hit_test(shape, 580.0, 139.0, scale));
+                let regions = island_regions(shape, scale).unwrap();
+                let main = regions.0[0].unwrap();
+                let companion = regions.0[1].unwrap();
+                assert!(main.right < companion.left);
+                assert_eq!(main.left + companion.right, (580.0 * scale) as i32);
+            }
+        }
+    }
+
+    #[test]
+    fn dropdown_uses_rounded_union_without_blocking_blank_sides() {
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 3.0] {
+            let shape = IslandShape::NotificationLayout(NotificationLayout {
+                mode: NotificationMode::List, main_open: true, list_height: 280,
+            });
+            let list = island_regions(shape, scale).unwrap().0[2].unwrap();
+            assert!(island_hit_test(shape, 290.0, 300.0, scale));
+            assert!(island_hit_test(shape, 480.0, 300.0, scale));
+            assert!(!island_hit_test(shape, 70.0, 300.0, scale));
+            assert!(!island_hit_test(shape, 510.0, 300.0, scale));
+            assert!(!island_hit_test(shape, 290.0, 470.0, scale));
+            assert!(!island_hit_test(shape, list.left as f64 / scale, list.top as f64 / scale, scale));
+            assert!(!island_hit_test(shape, 334.0, 139.0, scale));
+            // A list layout always uses a collapsed primary island.
+            assert!((island_regions(shape, scale).unwrap().0[0].unwrap().bottom as f64) < 170.0 * scale);
+        }
+    }
+
+    #[test]
+    fn transition_union_preserves_all_motion_and_none_restores_original_shape() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let layout = NotificationLayout { mode: NotificationMode::Transition, main_open: true, list_height: 280 };
+            let shape = IslandShape::NotificationLayout(layout);
+            assert!(island_hit_test(shape, 4.0, 112.0, scale));
+            assert!(island_hit_test(shape, 576.0, 468.0, scale));
+            assert!(island_hit_test(shape, 362.0, 139.0, scale));
+            assert!(!island_hit_test(shape, 290.0, 480.0, scale));
+            for open in [false, true] {
+                let layout = NotificationLayout { mode: NotificationMode::None, main_open: open, list_height: 0 };
+                assert_eq!(island_regions(IslandShape::NotificationLayout(layout), scale),
+                    island_regions(if open { IslandShape::Dial } else { IslandShape::Pill }, scale));
+            }
+        }
+    }
+
     #[test]
     fn input_policy_preserves_our_drag_and_does_not_steal_external_drags() {
         assert_eq!(overlay_mouse_policy(true, true, true, true, false, false), (true, false));
@@ -630,6 +816,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn notification_region_preserves_rounded_card_and_shadow_on_every_scale() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let clip = island_region(IslandShape::Notification, scale).unwrap();
+            assert!((clip.left as f64) < 120.0 * scale);
+            assert!((clip.top as f64) < 120.0 * scale);
+            assert!((clip.right as f64) > 460.0 * scale);
+            assert!((clip.bottom as f64) > 280.0 * scale);
+            assert!(island_hit_test(IslandShape::Notification, 290.0, 200.0, scale));
+            assert!(!island_hit_test(IslandShape::Notification, 100.0, 200.0, scale));
+            assert!(!island_hit_test(IslandShape::Notification, 290.0, 300.0, scale));
+        }
+    }
     #[test]
     fn pill_region_matches_the_stable_canvas_with_shadow_and_antialias_margin() {
         assert_eq!(island_region(IslandShape::Pill, 1.0), Some(ClipRegion {

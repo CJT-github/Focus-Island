@@ -1,0 +1,64 @@
+{
+	admin off
+	persist_config off
+	auto_https disable_redirects
+	grace_period 5s
+	# Error logs can contain the credential-bearing request URI.
+	log {
+		exclude http.log.access http.log.error
+	}
+	servers {
+		protocols h1 h2
+		max_header_size 8KiB
+		timeouts {
+			read_header 5s
+			read_body 10s
+			write 15s
+			idle 30s
+		}
+	}
+}
+
+# Never redirect a secret URL through an unencrypted Location header.
+http://{$WEBHOOK_DOMAIN} {
+	log_skip
+	respond "HTTPS required" 400
+}
+
+https://{$WEBHOOK_DOMAIN} {
+	log_skip
+	header {
+		Cache-Control "no-store"
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+	}
+	@webhook {
+		method POST
+		path /api/webhook /api/webhook/*
+	}
+	handle @webhook {
+		@missingLength not header Content-Length *
+		respond @missingLength "Content-Length required" 411
+		request_body {
+			max_size 16KiB
+		}
+		reverse_proxy 127.0.0.1:17892 {
+			# The desktop HTTP receiver requires a bounded Content-Length.
+			request_buffers 17KiB
+			transport http {
+				versions 1.1
+				dial_timeout 2s
+				response_header_timeout 5s
+				read_timeout 5s
+				write_timeout 5s
+				keepalive off
+			}
+		}
+	}
+	handle {
+		respond "Not Found" 404
+	}
+	handle_errors {
+		respond "Webhook gateway unavailable" {err.status_code}
+	}
+}

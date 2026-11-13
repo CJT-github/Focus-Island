@@ -237,6 +237,223 @@ impl Settings {
     }
 }
 
+/// Phone preferences are independent of timer tasks. No notification content is saved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhoneSettings {
+    pub enabled: bool,
+    pub display_seconds: u64,
+    pub hide_content: bool,
+    pub device_address: String,
+    pub device_name: String,
+}
+impl Default for PhoneSettings {
+    fn default() -> Self {
+        Self { enabled: false, display_seconds: 8, hide_content: false,
+            device_address: String::new(), device_name: String::new() }
+    }
+}
+impl PhoneSettings {
+    pub fn normalize(&mut self) {
+        self.display_seconds = self.display_seconds.clamp(3, 30);
+        self.device_address = self.device_address.parse::<u64>().ok()
+            .filter(|value| *value > 0 && *value <= 0xffff_ffff_ffff)
+            .map(|value| value.to_string()).unwrap_or_default();
+        self.device_name = self.device_name.chars().filter(|c| !c.is_control()).take(80).collect();
+        if self.device_address.is_empty() { self.device_name.clear(); }
+    }
+}
+// A malformed phone preference must never discard the user's tasks or actions.
+impl<'de> Deserialize<'de> for PhoneSettings {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut settings = Self::default();
+        if let Some(object) = value.as_object() {
+            settings.enabled = object.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            settings.display_seconds = object.get("displaySeconds").and_then(|v| v.as_u64()).unwrap_or(8);
+            settings.hide_content = object.get("hideContent").and_then(|v| v.as_bool()).unwrap_or(false);
+            settings.device_address = object.get("deviceAddress").and_then(|v| v.as_str()).unwrap_or("").into();
+            settings.device_name = object.get("deviceName").and_then(|v| v.as_str()).unwrap_or("").into();
+        }
+        settings.normalize();
+        Ok(settings)
+    }
+}
+/// Independent presentation preferences shared by every notification source.
+/// Notification content remains in memory and is never part of AppState.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationSettings {
+    pub enabled: bool,
+    pub display_seconds: u64,
+    pub list_limit: u64,
+}
+impl Default for NotificationSettings {
+    fn default() -> Self { Self { enabled: true, display_seconds: 5, list_limit: 5 } }
+}
+impl NotificationSettings {
+    pub fn normalize(&mut self) {
+        self.display_seconds = self.display_seconds.clamp(1, 30);
+        self.list_limit = self.list_limit.clamp(1, 10);
+    }
+}
+// Tolerant disk loading is separate from strict configuration IPC validation.
+impl<'de> Deserialize<'de> for NotificationSettings {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut settings = Self::default();
+        if let Some(object) = value.as_object() {
+            settings.enabled = object.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            settings.display_seconds = object.get("displaySeconds").and_then(|v| v.as_u64()).unwrap_or(5);
+            settings.list_limit = object.get("listLimit").and_then(|v| v.as_u64()).unwrap_or(5);
+        }
+        settings.normalize();
+        Ok(settings)
+    }
+}
+
+/// Listener preferences only; credentials and payloads must never reach diagnostics.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub struct WebhookSettings {
+    pub enabled: bool,
+    pub scope: String,
+    pub port: u16,
+    #[serde(rename = "publicBaseUrl")]
+    pub public_base_url: String,
+    pub token: String,
+}
+
+impl Default for WebhookSettings {
+    fn default() -> Self {
+        Self { enabled: false, scope: "local".into(), port: 17891, public_base_url: String::new(), token: String::new() }
+    }
+}
+
+impl std::fmt::Debug for WebhookSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookSettings").field("enabled", &self.enabled)
+            .field("scope", &self.scope).field("port", &self.port)
+            .field("public_base_url", &self.public_base_url).field("token", &"<redacted>").finish()
+    }
+}
+
+/// Parse a user-supplied HTTPS origin; credentials, path prefixes and query data
+/// are never accepted as a public endpoint base. Empty input disables this hint.
+pub fn normalized_public_base_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() { return Some(String::new()); }
+    if value.len() > 2048 || value.chars().any(char::is_control)
+        || value.contains(['\\', '?', '#']) || !value.get(..8)?.eq_ignore_ascii_case("https://") {
+        return None;
+    }
+    let authority = value.get(8..)?.strip_suffix('/').unwrap_or(&value[8..]);
+    if authority.is_empty() || authority.contains(['/', '@']) || authority.ends_with(':') { return None; }
+    let parsed = url::Url::parse(value).ok()?;
+    if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some()
+        || parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() || parsed.port() == Some(0) {
+        return None;
+    }
+    match parsed.host()? {
+        url::Host::Domain(domain) => {
+            let domain = domain.strip_suffix('.').unwrap_or(domain);
+            if domain.is_empty() || domain.len() > 253 || domain.split('.').any(|label|
+                label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-')
+                    || !label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')) {
+                return None;
+            }
+        }
+        url::Host::Ipv4(_) | url::Host::Ipv6(_) => {}
+    }
+    Some(parsed.origin().ascii_serialization())
+}
+
+impl WebhookSettings {
+    pub fn has_valid_token(&self) -> bool {
+        self.token.len() == 64 && self.token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    pub fn normalize(&mut self) {
+        if !matches!(self.scope.as_str(), "local" | "lan") { self.scope = "local".into(); }
+        if self.port < 1024 { self.port = 17891; }
+        self.public_base_url = normalized_public_base_url(&self.public_base_url).unwrap_or_default();
+        if !self.has_valid_token() {
+            self.enabled = false;
+            self.token.clear();
+        }
+    }
+}
+
+// The disk format is deliberately tolerant; explicit configuration is validated separately.
+// Loading an older or damaged profile never creates a credential or opens an unauthenticated port.
+impl<'de> Deserialize<'de> for WebhookSettings {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut settings = Self::default();
+        if let Some(object) = value.as_object() {
+            settings.enabled = object.get("enabled").and_then(|value| value.as_bool()).unwrap_or(false);
+            settings.scope = object.get("scope").and_then(|value| value.as_str()).unwrap_or("local").into();
+            settings.port = object.get("port").and_then(|value| value.as_u64())
+                .and_then(|value| u16::try_from(value).ok()).filter(|value| *value >= 1024).unwrap_or(17891);
+            settings.public_base_url = object.get("publicBaseUrl").and_then(|value| value.as_str()).unwrap_or("").into();
+            settings.token = object.get("token").and_then(|value| value.as_str()).unwrap_or("").into();
+        }
+        settings.normalize();
+        Ok(settings)
+    }
+}
+
+
+/// Outbound server connection. Never serialize this key into a UI broadcast.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelaySettings {
+    pub enabled: bool,
+    pub service_url: String,
+    pub connection_key: String,
+}
+impl Default for RelaySettings {
+    fn default() -> Self { Self { enabled: false, service_url: String::new(), connection_key: String::new() } }
+}
+impl std::fmt::Debug for RelaySettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelaySettings").field("enabled", &self.enabled)
+            .field("service_url", &self.service_url).field("connection_key", &"<redacted>").finish()
+    }
+}
+impl RelaySettings {
+    pub fn has_valid_key(&self) -> bool {
+        self.connection_key.len() == 64 && self.connection_key.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if normalized_public_base_url(&self.service_url).as_deref() != Some(self.service_url.as_str()) {
+            return Err("服务地址须为有效 HTTPS 域名地址，不能带路径、账号或查询参数".into());
+        }
+        if (!self.connection_key.is_empty() && !self.has_valid_key())
+            || (self.enabled && (!self.has_valid_key() || self.service_url.is_empty())) {
+            return Err("开启服务器连接需填写 HTTPS 服务地址和 64 位连接密钥".into());
+        }
+        Ok(())
+    }
+    pub fn normalize(&mut self) {
+        self.service_url = normalized_public_base_url(&self.service_url).unwrap_or_default();
+        if !self.has_valid_key() { self.connection_key.clear(); }
+        if self.service_url.is_empty() || self.connection_key.is_empty() { self.enabled = false; }
+    }
+}
+impl<'de> Deserialize<'de> for RelaySettings {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut settings = Self::default();
+        if let Some(object) = value.as_object() {
+            settings.enabled = object.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            settings.service_url = object.get("serviceUrl").and_then(|v| v.as_str()).unwrap_or("").into();
+            settings.connection_key = object.get("connectionKey").and_then(|v| v.as_str()).unwrap_or("").into();
+        }
+        settings.normalize();
+        Ok(settings)
+    }
+}
+
 /// 应用持久化状态。新增字段缺失时使用默认值，保留已有用户数据。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -246,6 +463,10 @@ pub struct AppState {
     /// 当前配置的倒计时时长（秒），可以与所选任务的原始时长不同。
     pub duration_sec: u64,
     pub settings: Settings,
+    pub phone: PhoneSettings,
+    pub notifications: NotificationSettings,
+    pub webhook: WebhookSettings,
+    pub relay: RelaySettings,
 }
 
 impl Default for AppState {
@@ -260,6 +481,10 @@ impl Default for AppState {
             duration_sec: tasks[0].sec,
             tasks,
             settings: Settings::default(),
+            phone: PhoneSettings::default(),
+            notifications: NotificationSettings::default(),
+            webhook: WebhookSettings::default(),
+            relay: RelaySettings::default(),
         }
     }
 }
@@ -292,6 +517,10 @@ impl AppState {
         self.current_id = self.current_task().map(|task| task.id.clone()).unwrap_or_default();
         self.duration_sec = self.duration_sec.clamp(1, MAX_DURATION_SEC);
         self.settings.normalize_top_offset();
+        self.phone.normalize();
+        self.notifications.normalize();
+        self.webhook.normalize();
+        self.relay.normalize();
     }
 
     /// 载入状态；文件缺失时初始化，损坏或读取失败时记录原因并使用默认状态。
@@ -369,6 +598,170 @@ mod tests {
             let _ = std::fs::remove_file(&self.0);
             let _ = std::fs::remove_dir(self.0.parent().unwrap());
         }
+    }
+
+    #[test]
+    fn webhook_legacy_and_damaged_preferences_preserve_tasks_and_remain_disabled() {
+        let original = AppState::default();
+        let original_json = serde_json::to_value(&original).unwrap();
+        assert_eq!(original_json["webhook"],
+            serde_json::json!({"enabled":false,"scope":"local","port":17891,"publicBaseUrl":"","token":""}));
+        let mut legacy = original_json.clone();
+        legacy.as_object_mut().unwrap().remove("webhook");
+        assert_eq!(serde_json::from_value::<AppState>(legacy).unwrap().webhook, WebhookSettings::default());
+        for value in [serde_json::json!(null), serde_json::json!(false), serde_json::json!([]),
+            serde_json::json!("corrupt"),
+            serde_json::json!({"enabled":"true","scope":[],"port":-1,"token":{}}),
+            serde_json::json!({"enabled":true,"scope":"unknown","port":65536,"token":null})] {
+            let mut damaged = original_json.clone();
+            damaged["webhook"] = value;
+            let loaded: AppState = serde_json::from_value(damaged).unwrap();
+            assert_eq!(loaded.webhook, WebhookSettings::default());
+            assert_eq!(serde_json::to_value(loaded).unwrap(), original_json);
+        }
+    }
+
+    #[test]
+    fn webhook_invalid_credentials_cannot_enable_listener_or_discard_saved_task() {
+        let file = TestFile::new();
+        let original = serde_json::json!({
+            "tasks":[{"id":"kept","name":"Kept task","sec":7,
+                "completionAction":{"enabled":true,"kind":"lock","delaySec":3}}],
+            "current_id":"kept","duration_sec":11,
+            "settings":{"sound":false,"reduceMotion":true}
+        });
+        for token in [String::new(), "a".repeat(63), "a".repeat(65), "g".repeat(64),
+            "\u{00e9}".repeat(32), format!("{} ", "a".repeat(63)),
+            format!("{}\n", "a".repeat(63))] {
+            let mut value = original.clone();
+            value["webhook"] = serde_json::json!({"enabled":true,"scope":"lan","port":17892,"token":token});
+            let raw = serde_json::to_vec(&value).unwrap();
+            std::fs::write(&file.0, &raw).unwrap();
+            let loaded = AppState::load(&file.0);
+            assert!(!loaded.webhook.enabled);
+            assert!(loaded.webhook.token.is_empty());
+            assert_eq!(loaded.webhook.scope, "lan");
+            assert_eq!(loaded.webhook.port, 17892);
+            assert_eq!(loaded.tasks.len(), 1);
+            assert_eq!(loaded.tasks[0].id, "kept");
+            assert_eq!(loaded.tasks[0].sec, 7);
+            assert!(loaded.tasks[0].completion_action.enabled);
+            assert_eq!(loaded.tasks[0].completion_action.kind, ActionKind::Lock);
+            assert_eq!(loaded.current_id, "kept");
+            assert_eq!(loaded.duration_sec, 11);
+            assert!(!loaded.settings.sound);
+            assert_eq!(std::fs::read(&file.0).unwrap(), raw, "load must not rewrite or mint credentials");
+        }
+    }
+
+    #[test]
+    fn webhook_credentials_persist_exactly_but_never_appear_in_debug() {
+        let file = TestFile::new();
+        let mut state = AppState::default();
+        let token = "aB0123456789cDeF".repeat(4);
+        state.webhook = WebhookSettings { enabled: true, scope: "lan".into(), port: 17892, public_base_url: "https://notify.example.com".into(), token: token.clone() };
+        assert!(state.webhook.has_valid_token());
+        state.save_to_path(&file.0).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file.0).unwrap()).unwrap();
+        assert_eq!(saved["webhook"]["token"], token);
+        assert_eq!(AppState::load(&file.0).webhook, state.webhook);
+        for debug in [format!("{:?}", state.webhook), format!("{:#?}", state)] {
+            assert!(!debug.contains(&token));
+            assert!(debug.contains("<redacted>"));
+        }
+        state.webhook.enabled = false;
+        state.save_to_path(&file.0).unwrap();
+        assert_eq!(AppState::load(&file.0).webhook.token, token, "disabling keeps a valid credential until explicit rotation");
+    }
+
+    #[test]
+    fn webhook_public_url_accepts_only_https_origins_and_clears_damage() {
+        for (input, expected) in [
+            ("", ""), ("   ", ""), ("https://notify.example.com", "https://notify.example.com"),
+            ("HTTPS://Notify.Example.COM:443/", "https://notify.example.com"),
+            ("https://notify.example.com:8443/", "https://notify.example.com:8443"),
+            ("https://192.0.2.5/", "https://192.0.2.5"),
+            ("https://[2001:db8::1]:8443/", "https://[2001:db8::1]:8443"),
+        ] {
+            assert_eq!(normalized_public_base_url(input).as_deref(), Some(expected));
+        }
+        let token = "f".repeat(64);
+        for input in [
+            "http://notify.example.com", "https://", "https://user@notify.example.com",
+            "https://@notify.example.com", "https://user:password@notify.example.com",
+            "https://notify.example.com/api", "https://notify.example.com/.",
+            "https://notify.example.com//", "https://notify.example.com?secret",
+            "https://notify.example.com/#", "https://notify.example.com\\",
+            "https://notify.example.com:", "https://notify.example.com:0",
+            "https://notify.example.com:65536", "https://bad..example.com",
+            "https://-bad.example.com", "https://bad_host.example.com", "https://noti\nfy.example.com",
+        ] {
+            assert!(normalized_public_base_url(input).is_none(), "accepted invalid public origin: {input:?}");
+            let loaded: WebhookSettings = serde_json::from_value(serde_json::json!({
+                "enabled":true,"scope":"lan","port":17892,"publicBaseUrl":input,"token":token
+            })).unwrap();
+            assert!(loaded.enabled, "public URL damage must not change the local listener");
+            assert!(loaded.public_base_url.is_empty());
+            assert_eq!(loaded.scope, "lan");
+            assert_eq!(loaded.port, 17892);
+            assert_eq!(loaded.token, token);
+        }
+        let loaded: WebhookSettings = serde_json::from_value(serde_json::json!({
+            "publicBaseUrl":{},"enabled":true,"token":token
+        })).unwrap();
+        assert!(loaded.public_base_url.is_empty());
+        assert!(loaded.enabled);
+    }
+
+    #[test]
+    fn webhook_normalization_limits_scope_and_port_without_inventing_a_token() {
+        let token = "f".repeat(64);
+        for port in [serde_json::json!(0), serde_json::json!(1), serde_json::json!(1023), serde_json::json!(-1), serde_json::json!(65536),
+            serde_json::json!(1.25), serde_json::json!("17891"), serde_json::json!(null)] {
+            let loaded: WebhookSettings = serde_json::from_value(serde_json::json!({
+                "enabled":true,"scope":"unrecognized","port":port,"token":token
+            })).unwrap();
+            assert!(loaded.enabled);
+            assert_eq!(loaded.scope, "local");
+            assert_eq!(loaded.port, 17891);
+            assert_eq!(loaded.token, token);
+        }
+        let mut state = AppState::default();
+        state.webhook = WebhookSettings { enabled:true, scope:"all".into(), port:0, token, ..WebhookSettings::default() };
+        state.normalize();
+        assert!(state.webhook.enabled);
+        assert_eq!(state.webhook.scope, "local");
+        assert_eq!(state.webhook.port, 17891);
+        state.webhook.token.clear();
+        state.normalize();
+        assert!(!state.webhook.enabled);
+        assert!(state.webhook.token.is_empty());
+    }
+
+    #[test]
+    fn notification_preferences_default_and_tolerate_damage_without_losing_tasks() {
+        let original = AppState::default();
+        let original_json = serde_json::to_value(&original).unwrap();
+        assert_eq!(original_json["notifications"],
+            serde_json::json!({"enabled":true,"displaySeconds":5,"listLimit":5}));
+        let mut legacy = original_json.clone();
+        legacy.as_object_mut().unwrap().remove("notifications");
+        assert_eq!(serde_json::from_value::<AppState>(legacy).unwrap().notifications,
+            NotificationSettings::default());
+        for value in [serde_json::json!(null), serde_json::json!(false), serde_json::json!([]),
+            serde_json::json!({"enabled":"true","displaySeconds":"5","listLimit":-1}),
+            serde_json::json!({"enabled":null,"displaySeconds":2.5,"listLimit":{}})] {
+            let mut damaged = original_json.clone();
+            damaged["notifications"] = value;
+            let loaded: AppState = serde_json::from_value(damaged).unwrap();
+            assert_eq!(loaded.notifications, NotificationSettings::default());
+            assert_eq!(serde_json::to_value(loaded).unwrap(), original_json);
+        }
+        let settings: NotificationSettings = serde_json::from_value(serde_json::json!({
+            "enabled":false,"displaySeconds":99,"listLimit":0})).unwrap();
+        assert!(!settings.enabled);
+        assert_eq!(settings.display_seconds, 30);
+        assert_eq!(settings.list_limit, 1);
     }
 
     #[test]
@@ -695,5 +1088,21 @@ mod tests {
         assert_eq!(Task::new("测试".into(), 3).duration_label(), "3 秒");
         assert_eq!(Task::new("测试".into(), 61).duration_label(), "1 分 1 秒");
         assert_eq!(Task::new("测试".into(), 3_601).duration_label(), "1 小时 0 分 1 秒");
+    }
+
+    #[test]
+    fn relay_settings_validate_https_and_preserve_no_legacy_secrets() {
+        let empty: RelaySettings = serde_json::from_str("{}").unwrap();
+        assert!(!empty.enabled && empty.connection_key.is_empty());
+        assert!(empty.validate().is_ok());
+        let valid = RelaySettings { enabled: true, service_url: "https://hooks.example.com".into(), connection_key: "ab".repeat(32) };
+        assert!(valid.validate().is_ok());
+        assert!(!format!("{:?}", valid).contains(&valid.connection_key));
+        for url in ["http://localhost", "https://user:pass@example.com", "https://example.com/path", "https://example.com?q=x"] {
+            let mut bad = valid.clone(); bad.service_url = url.into(); assert!(bad.validate().is_err());
+            bad.normalize(); assert!(!bad.enabled);
+        }
+        let corrupt: RelaySettings = serde_json::from_str(r#"{"enabled":true,"serviceUrl":"https://hooks.example.com","connectionKey":"short"}"#).unwrap();
+        assert!(!corrupt.enabled && corrupt.connection_key.is_empty());
     }
 }

@@ -8,7 +8,9 @@ on:
       - 'Cargo.lock'
       - 'src/**'
       - 'ui/**'
+      - 'android/**'
       - 'tools/**'
+      - 'deploy/**'
       - 'README.md'
       - 'PACKAGING.txt'
       - 'PROMPT.md'
@@ -71,6 +73,19 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+  relay:
+    name: Webhook relay
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Test relay with the deployment Node version
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD/deploy/relay:/work:ro" -w /work node:24-alpine node --test server.test.cjs
 
   macos:
     name: macOS ${{ matrix.arch }}

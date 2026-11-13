@@ -43,6 +43,7 @@ async function launch(){
   window.__fromRust('syncTimer');
   window.ipc.postMessage(JSON.stringify({type:'togglePanel'}));
  });
+ await panel.locator('#btnOpenPreferencesPage').click();
  await panel.waitForFunction(()=>!!document.querySelector('#inTopOffset'));
  await delay(250);
 }
@@ -64,6 +65,7 @@ async function assertPosition(requested){
  return w.outer;
 }
 async function apply(value){
+ await panel.locator('#btnOpenPreferencesPage').click();
  await panel.locator('#inTopOffset').fill(String(value));
  await panel.locator('#inTopOffset').press('Enter');
  for(let i=0;i<100&&saved().settings.topOffset!==value;i++)await delay(25);
@@ -76,9 +78,9 @@ async function apply(value){
   await launch();
   assert.equal(await panel.inputValue('#inTopOffset'),'20');await assertPosition(20);
   pass('Legacy profile defaults to 20 px');
-  const panelBefore=geometry().find(w=>w.title==='Focus Island 设置').outer;
+  const panelBefore=geometry().find(w=>w.title==='Focus Island · 功能面板').outer;
   const pill=await apply(80);
-  assert.deepEqual(geometry().find(w=>w.title==='Focus Island 设置').outer,panelBefore);
+  assert.deepEqual(geometry().find(w=>w.title==='Focus Island · 功能面板').outer,panelBefore);
   await island.evaluate(()=>document.querySelector('#island').click());
   await island.waitForFunction(()=>window.__isOpen());await delay(500);
   assert.deepEqual(await assertPosition(80),pill);
@@ -86,7 +88,7 @@ async function apply(value){
   await island.waitForFunction(()=>!window.__isOpen());await delay(500);
   assert.deepEqual(await assertPosition(80),pill);
   pass('Apply moves pill immediately; dial and collapse share the same stable viewport');
-  await panel.locator('#btnStart').click();
+  await panel.locator('#btnOpenTimerPage').click();await panel.locator('#btnStart').click();
   await panel.waitForFunction(()=>window.__testTimer?.running===true);
   const before=await panel.evaluate(()=>window.__testTimer);
   await apply(250);await delay(1100);
@@ -94,7 +96,7 @@ async function apply(value){
   assert.equal(after.runId,before.runId);assert.equal(after.taskId,before.taskId);
   assert.equal(after.totalMs,before.totalMs);assert(after.running&&after.remainingMs<=before.remainingMs);
   assert.equal(saved().current_id,'offset-test');assert.equal(saved().duration_sec,120);
-  await panel.locator('#btnStart').click();
+  await panel.locator('#btnOpenTimerPage').click();await panel.locator('#btnStart').click();
   await panel.waitForFunction(()=>window.__testTimer?.running===false);
   const paused=await island.textContent('#readoutDigits');await apply(84);await delay(1100);
   assert.equal(await island.textContent('#readoutDigits'),paused);

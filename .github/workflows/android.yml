@@ -1,0 +1,63 @@
+name: Build Android companion
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-companion-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android companion test APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: |
+            android/*.gradle
+            android/gradle/wrapper/gradle-wrapper.properties
+      - name: Install Android SDK components
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+      - name: Unit tests, lint and installable test APK
+        working-directory: android
+        run: bash ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
+      - name: Prepare APK and checksum
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/FocusIsland-Companion-android-debug.apk
+          cd dist
+          sha256sum FocusIsland-Companion-android-debug.apk > FocusIsland-Companion-android-debug.apk.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: FocusIsland-android-companion
+          path: |
+            dist/FocusIsland-Companion-android-debug.apk
+            dist/FocusIsland-Companion-android-debug.apk.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Publish test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: FocusIsland-android-reports
+          path: |
+            android/app/build/reports/tests/
+            android/app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
+          retention-days: 14

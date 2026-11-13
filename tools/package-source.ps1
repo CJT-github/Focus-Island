@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -62,6 +62,40 @@ function Get-PackageFiles {
     }
     foreach ($directory in @('src', 'ui', '.github/workflows')) {
         Get-SafeTreeFiles (Join-Path $projectRoot $directory)
+    }
+    $androidRoot = Join-Path $projectRoot 'android'
+    if (Test-Path -LiteralPath $androidRoot -PathType Container) {
+        # Android source only: never package SDK/Gradle caches, signing keys,
+        # local.properties, device logs, or generated APK/build directories.
+        foreach ($name in @('build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts',
+            'gradle.properties', 'gradlew', 'gradlew.bat', '.gitignore', 'README.md', 'build.ps1', 'build-local.ps1')) {
+            $androidFile = Join-Path $androidRoot $name
+            if (Test-Path -LiteralPath $androidFile -PathType Leaf) {
+                Assert-NoReparse (Assert-SourcePath $androidFile)
+            }
+        }
+        foreach ($name in @('app/build.gradle', 'app/build.gradle.kts', 'app/proguard-rules.pro')) {
+            $androidFile = Join-Path $androidRoot $name
+            if (Test-Path -LiteralPath $androidFile -PathType Leaf) {
+                Assert-NoReparse (Assert-SourcePath $androidFile)
+            }
+        }
+        foreach ($directory in @('app/src', 'gradle', 'tests')) {
+            $androidTree = Join-Path $androidRoot $directory
+            if (Test-Path -LiteralPath $androidTree -PathType Container) { Get-SafeTreeFiles $androidTree }
+        }
+    }
+    # Only these deployment templates are distributable. Never recurse into
+    # deploy: a real .env, certificates or server-local files must stay private.
+    foreach ($name in @('deploy/webhook/Caddyfile', 'deploy/webhook/compose.yml',
+        'deploy/webhook/README.md', 'deploy/webhook/.env.example')) {
+        $item = Assert-NoReparse (Assert-SourcePath (Join-Path $projectRoot $name))
+        if ($item.PSIsContainer) { throw "Expected a deployment file: $name" }
+        $item
+    }
+    # Relay deployment uses an exact allowlist; private .env never enters archives.
+    foreach ($name in @('server.cjs', 'server.test.cjs', 'init.cjs', 'Dockerfile', 'compose.yml', 'Caddyfile', '.env.example', '.dockerignore', 'README.md')) {
+        Assert-NoReparse (Assert-SourcePath (Join-Path $projectRoot ('deploy/relay/' + $name)))
     }
     $toolsRoot = Assert-SourcePath (Join-Path $projectRoot 'tools')
     foreach ($item in Get-ChildItem -LiteralPath $toolsRoot -Force -File) {
