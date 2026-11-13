@@ -31,6 +31,8 @@ jobs:
           cache-dependency-path: |
             android/*.gradle
             android/gradle/wrapper/gradle-wrapper.properties
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
       - name: Install Android SDK components
         run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
       - name: Unit tests, lint and installable test APK
