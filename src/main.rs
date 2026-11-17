@@ -50,6 +50,7 @@ enum Command {
     SetNotificationLayout(window::NotificationLayout, u64),
     NotificationsConfigure(serde_json::Value),
     NotificationTest,
+    OpenNotificationLink(String),
     WebhookConfigure(serde_json::Value, u64),
     WebhookRotateToken(u64),
     WebhookStatus,
@@ -58,6 +59,9 @@ enum Command {
     WebhookEvent(webhook::WebhookEvent),
     RelayConfigure(serde_json::Value, u64),
     RelayStatus,
+    LocalWebhookChannels(serde_json::Value, u64),
+    RelayChannels(serde_json::Value, u64),
+    RelayChannelsFinished(u64, state::RelaySettings, Result<serde_json::Value, String>),
     RelayEvent(relay::RelayEvent),
     RelayAcknowledged(relay::RelayEvent),
     PhoneConfigure(serde_json::Value),
@@ -91,6 +95,28 @@ enum Command {
     Quit,
 }
 
+fn valid_notification_url(value: &str) -> Option<String> {
+    if value.len() > 4096 || value.chars().any(char::is_control) { return None; }
+    let parsed = url::Url::parse(value).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none()
+        || !parsed.username().is_empty() || parsed.password().is_some() { return None; }
+    Some(parsed.to_string())
+}
+
+fn open_notification_link(url: &str) {
+    #[cfg(target_os = "windows")]
+    let result = {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", url]).creation_flags(0x08000000).spawn()
+    };
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+    if let Err(error) = result { log(&format!("Could not open notification link: {}", error)); }
+}
+
 fn parse_command(raw: &str) -> Option<Command> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     let request_id = v.get("requestId").and_then(serde_json::Value::as_u64).unwrap_or(0);
@@ -101,10 +127,13 @@ fn parse_command(raw: &str) -> Option<Command> {
         "setNotificationLayout" => Command::SetNotificationLayout(window::NotificationLayout::from_value(&v)?, request_id),
         "notificationsConfigure" => Command::NotificationsConfigure(v.get("settings").cloned().unwrap_or(serde_json::Value::Null)),
         "notificationTest" => Command::NotificationTest,
+        "openNotificationLink" => Command::OpenNotificationLink(valid_notification_url(v.get("url")?.as_str()?)?),
         "webhookConfigure" => Command::WebhookConfigure(v.get("settings").cloned().unwrap_or(serde_json::Value::Null), request_id),
         "webhookRotateToken" => Command::WebhookRotateToken(request_id),
         "webhookStatus" => Command::WebhookStatus,
         "relayStatus" => Command::RelayStatus,
+        "localWebhookChannels" => Command::LocalWebhookChannels(v.get("operation")?.clone(), request_id),
+        "relayChannels" => Command::RelayChannels(v.get("operation")?.clone(), request_id),
         "relayConfigure" => Command::RelayConfigure(v.get("settings").cloned().unwrap_or(serde_json::Value::Null), request_id),
         "webhookTest" => Command::WebhookTest(request_id),
         "phoneConfigure" => Command::PhoneConfigure(v.get("settings").cloned().unwrap_or(serde_json::Value::Null)),
@@ -148,10 +177,10 @@ fn parse_command(raw: &str) -> Option<Command> {
 
 fn parse_view_command(raw: &str, island: bool) -> Option<Command> {
     let command = parse_command(raw)?;
-    if !island && matches!(command, Command::TimerState(_) | Command::TimerDone(_) | Command::SetNotificationShape(_, _) | Command::SetNotificationLayout(_, _)) { return None; }
+    if !island && matches!(command, Command::OpenNotificationLink(_) | Command::TimerState(_) | Command::TimerDone(_) | Command::SetNotificationShape(_, _) | Command::SetNotificationLayout(_, _)) { return None; }
     // Network input never enters IPC; only the settings view may manage credentials.
     if island && matches!(command, Command::WebhookConfigure(_, _) | Command::WebhookRotateToken(_)
-        | Command::WebhookStatus | Command::WebhookTest(_) | Command::RelayStatus | Command::RelayConfigure(_, _)) { return None; }
+        | Command::WebhookStatus | Command::WebhookTest(_) | Command::RelayStatus | Command::RelayConfigure(_, _) | Command::RelayChannels(_, _) | Command::LocalWebhookChannels(_, _)) { return None; }
     Some(command)
 }
 
@@ -315,6 +344,38 @@ fn configured_webhook_state(state: &AppState, manager: &mut webhook::WebhookMana
 }
 
 
+fn configure_local_channels(state: &AppState, operation: &serde_json::Value, path: &std::path::Path) -> Result<AppState, String> {
+    let mut updated = state.clone();
+    let op = operation.get("op").and_then(|v| v.as_str()).ok_or("无效操作")?;
+    let channel_id = || operation.get("id").and_then(|v| v.as_str()).filter(|s| s.len()==32 && s.bytes().all(|b| b.is_ascii_hexdigit())).ok_or("无效入口");
+    let name = || operation.get("name").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty() && s.chars().count()<=40 && !s.chars().any(|c| c.is_control() || matches!(c,'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}'))).ok_or("名称须为 1–40 个有效字符");
+    match op {
+        "list" => return Ok(updated),
+        "create" => {
+            if updated.local_webhooks.len()>=32 { return Err("最多创建 32 个入口".into()); }
+            let token=webhook::generate_token()?;
+            let id=webhook::generate_token()?[..32].to_string();
+            if token==updated.webhook.token || updated.local_webhooks.iter().any(|c| c.token==token || c.id==id) { return Err("生成入口失败，请重试".into()); }
+            updated.local_webhooks.push(state::LocalWebhookChannel{id,name:name()?.to_string(),token,enabled:true});
+        },
+        "update" => {
+            let id=channel_id()?;
+            let channel=updated.local_webhooks.iter_mut().find(|c| c.id==id).ok_or("入口不存在")?;
+            if operation.get("name").is_some() {channel.name=name()?.to_string();}
+            if let Some(value)=operation.get("enabled") {channel.enabled=value.as_bool().ok_or("开关状态无效")?;}
+        },
+        "delete" => {
+            let id=channel_id()?;
+            let previous=updated.local_webhooks.len();
+            updated.local_webhooks.retain(|c| c.id!=id);
+            if previous==updated.local_webhooks.len() {return Err("入口不存在".into());}
+        },
+        _ => return Err("无效操作".into()),
+    }
+    updated.save_to_path(path).map_err(|e| format!("保存入口失败：{}",e))?;
+    Ok(updated)
+}
+
 fn configured_relay_state(state: &AppState, manager: &mut relay::RelayManager,
     value: &serde_json::Value, path: &std::path::Path) -> Result<AppState, String> {
     let mut updated = state.clone();
@@ -440,6 +501,7 @@ fn state_payload(state: &AppState) -> String {
     // named '</script>' from closing that element on the next launch.
     let mut value = serde_json::to_value(state).expect("state serialization");
     // Credentials only cross into the settings view via an explicit status/result.
+    if let Some(object)=value.as_object_mut(){object.remove("local_webhooks");}
     if let Some(webhook) = value.get_mut("webhook").and_then(|v| v.as_object_mut()) { webhook.remove("token"); }
     if let Some(relay) = value.get_mut("relay").and_then(|v| v.as_object_mut()) {
         relay.remove("connectionKey");
@@ -463,8 +525,50 @@ fn sync_state(state: &AppState, island: &WebView, panel: &WebView, reset: bool) 
     push(island, &js);
     push(panel, &js);
 }
+fn valid_font_family(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 160 && !name.starts_with('@') &&
+    !name.chars().any(|c| c.is_control() || matches!(c, '<'|'>'|'\\'|'"'|'\''))
+}
+#[cfg(target_os = "windows")]
+fn installed_fonts() -> Vec<String> {
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::Graphics::Gdi::{EnumFontFamiliesExW, GetDC, ReleaseDC, LOGFONTW, TEXTMETRICW};
+    unsafe extern "system" fn collect(font: *const LOGFONTW, _: *const TEXTMETRICW, _: u32, data: LPARAM) -> i32 {
+        let name = unsafe { &(*font).lfFaceName };
+        let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+        let value = String::from_utf16_lossy(&name[..end]);
+        if valid_font_family(&value) { unsafe { &mut *(data.0 as *mut Vec<String>) }.push(value); }
+        1
+    }
+    let mut fonts: Vec<String> = Vec::new();
+    unsafe {
+        let dc = GetDC(None);
+        if !dc.is_invalid() {
+            let mut query = LOGFONTW::default();
+            query.lfCharSet = windows::Win32::Graphics::Gdi::FONT_CHARSET(1);
+            EnumFontFamiliesExW(dc, &query, Some(collect), LPARAM(&mut fonts as *mut _ as isize), 0);
+            ReleaseDC(None, dc);
+        }
+    }
+    fonts.sort_by_key(|name| name.to_lowercase());fonts.dedup();fonts
+}
+#[cfg(target_os = "macos")]
+fn installed_fonts() -> Vec<String> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSFontManager;
+    let Some(main) = MainThreadMarker::new() else { return Vec::new() };
+    let families = NSFontManager::sharedFontManager(main).availableFontFamilies();
+    let mut fonts: Vec<String> = families.iter().map(|name| name.to_string()).filter(|name| valid_font_family(name)).collect();
+    fonts.sort_by_key(|name| name.to_lowercase());fonts.dedup();fonts
+}
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn installed_fonts() -> Vec<String> { Vec::new() }
+
 fn build_page(view: &str, state: &AppState, geo: &window::Geometry) -> String {
+    static FONTS: OnceLock<Vec<String>> = OnceLock::new();
+    let fonts = serde_json::to_string(FONTS.get_or_init(installed_fonts)).unwrap_or_else(|_| "[]".into());
     include_str!("../ui/index.html")
+        .replace("/*__FONTS__*/", &format!("{} ||", fonts))
         .replace("/*__CSS__*/", include_str!("../ui/styles.css"))
         .replace("/*__JS__*/", &format!("window.__PLATFORM__ = {:?};\n{}\n{}", std::env::consts::OS, include_str!("../ui/notifications.js"), include_str!("../ui/app.js")))
         .replace("/*__GEO__*/", &geo.to_json())
@@ -674,6 +778,7 @@ fn main() {
         let _ = webhook_proxy.send_event(());
         true
     });
+    webhook_manager.set_channels(&app_state.local_webhooks);
     let mut webhook_startup_error: Option<String> = None;
     if app_state.webhook.enabled && !selftest {
         match webhook_manager.prepare(&app_state.webhook) {
@@ -697,6 +802,8 @@ fn main() {
         }
     }
     let relay_ack_proxy = event_loop.create_proxy();
+    let relay_channels_proxy = event_loop.create_proxy();
+    let mut relay_channels_busy = false;
     let mut last_relay_status = serde_json::Value::Null;
 
     let webhook_test_proxy = event_loop.create_proxy();
@@ -778,8 +885,8 @@ fn main() {
         while let Ok(cmd) = rx.try_recv() {
             if verbose && !matches!(cmd, Command::TimerState(_) | Command::TimerDone(_)
                 | Command::SetCompletionAction(_, _) | Command::AddTask(_) | Command::PhoneEvent(_)
-                | Command::WebhookConfigure(_, _) | Command::WebhookEvent(_)
-                | Command::RelayConfigure(_, _) | Command::RelayEvent(_) | Command::RelayAcknowledged(_)) {
+                | Command::WebhookConfigure(_, _) | Command::WebhookEvent(_) | Command::OpenNotificationLink(_)
+                | Command::RelayConfigure(_, _) | Command::LocalWebhookChannels(_, _) | Command::RelayChannels(_, _) | Command::RelayChannelsFinished(_, _, _) | Command::RelayEvent(_) | Command::RelayAcknowledged(_)) {
                 log(&format!("收到命令: {:?}", cmd));
             }
             let mut changed = false;
@@ -872,6 +979,48 @@ fn main() {
                 }
 
 
+                Command::LocalWebhookChannels(operation, request_id) => {
+                    let result=configure_local_channels(&app_state,&operation,&path);
+                    let payload=match result {
+                        Ok(updated)=>{
+                            if operation.get("op").and_then(|v|v.as_str())!=Some("list") {
+                                app_state=updated;
+                                webhook_manager.set_channels(&app_state.local_webhooks);
+                            }
+                            serde_json::json!({"ok":true,"requestId":request_id,"channels":app_state.local_webhooks})
+                        },
+                        Err(message)=>serde_json::json!({"ok":false,"requestId":request_id,"message":message}),
+                    };
+                    push_callback(&panel_webview,"__localWebhookChannelsResult",&payload);
+                }
+                Command::RelayChannels(operation, request_id) => {
+                    if relay_channels_busy {
+                        push_callback(&panel_webview,"__relayChannelsResult",&serde_json::json!({"ok":false,"requestId":request_id,"message":"操作进行中，请稍后重试"}));
+                    } else {
+                        let settings=app_state.relay.clone();let result_tx=tx.clone();let result_proxy=relay_channels_proxy.clone();
+                        relay_channels_busy=true;
+                        if std::thread::Builder::new().name("relay-channels".into()).spawn(move || {
+                            let result=relay::manage_channels(&settings,&operation);
+                            let _=result_tx.send(Command::RelayChannelsFinished(request_id,settings,result));
+                            let _=result_proxy.send_event(());
+                        }).is_err() {
+                            relay_channels_busy=false;
+                            push_callback(&panel_webview,"__relayChannelsResult",&serde_json::json!({"ok":false,"requestId":request_id,"message":"无法启动操作，请重试"}));
+                        }
+                    }
+                }
+                Command::RelayChannelsFinished(request_id, settings, result) => {
+                    relay_channels_busy=false;
+                    if settings != app_state.relay {
+                        push_callback(&panel_webview,"__relayChannelsResult",&serde_json::json!({"ok":false,"requestId":request_id,"message":"服务器连接已变化，请刷新列表"}));
+                    } else {
+                        let payload=match result {
+                            Ok(data)=>serde_json::json!({"ok":true,"requestId":request_id,"data":data}),
+                            Err(message)=>serde_json::json!({"ok":false,"requestId":request_id,"message":message}),
+                        };
+                        push_callback(&panel_webview,"__relayChannelsResult",&payload);
+                    }
+                }
                 Command::RelayStatus => {
                     push_callback(&panel_webview, "__relayStatus", &relay_status_payload(&relay_manager,
                         &app_state, relay_startup_error.as_deref(), true, ready[0] && app_state.notifications.enabled));
@@ -1203,6 +1352,7 @@ fn main() {
                         if let Err(error) = panel.drag_window() { log(&format!("设置窗口拖动失败: {}", error)); }
                     }
                 }
+                Command::OpenNotificationLink(url) => open_notification_link(&url),
                 Command::AnimationDone => animation_done = true,
                 Command::SelftestResult(ok, message) => {
                     geometry_ok = ok;
@@ -1325,6 +1475,25 @@ mod tests {
             let _ = std::fs::remove_file(&self.0);
             let _ = std::fs::remove_dir(self.0.parent().unwrap());
         }
+    }
+
+    #[test]
+    fn local_channel_management_persists_and_restricts_credentials_to_panel() {
+        let file=TaskCreateTestFile::new();
+        let initial=AppState::default();
+        let created=configure_local_channels(&initial,&serde_json::json!({"op":"create","name":"构建通知"}),&file.0).unwrap();
+        assert_eq!(initial.local_webhooks.len(),0);
+        let channel=&created.local_webhooks[0];
+        assert_eq!(channel.name,"构建通知");assert!(channel.enabled);
+        let loaded=AppState::load(&file.0);assert_eq!(loaded.local_webhooks,created.local_webhooks);
+        assert!(!state_payload(&created).contains(&channel.token));
+        assert!(!format!("{:?}",channel).contains(&channel.token));
+        let raw=serde_json::json!({"type":"localWebhookChannels","operation":{"op":"list"},"requestId":1}).to_string();
+        assert!(parse_view_command(&raw,true).is_none());assert!(parse_view_command(&raw,false).is_some());
+        let disabled=configure_local_channels(&created,&serde_json::json!({"op":"update","id":channel.id,"enabled":false}),&file.0).unwrap();
+        assert!(!AppState::load(&file.0).local_webhooks[0].enabled);
+        let deleted=configure_local_channels(&disabled,&serde_json::json!({"op":"delete","id":channel.id}),&file.0).unwrap();
+        assert!(deleted.local_webhooks.is_empty());assert!(AppState::load(&file.0).local_webhooks.is_empty());
     }
 
     #[test]
@@ -1464,6 +1633,26 @@ mod tests {
         // Configuration never invalidated the already pending completion action.
         assert!(actions.poll(Instant::now()).is_none());
         assert_eq!(actions.status(), &action_before);
+    }
+
+    #[test]
+    fn enumerated_font_families_are_safe() {
+        let fonts = installed_fonts();
+        eprintln!("System font families: {}", fonts.len());
+        assert!(fonts.iter().all(|font| valid_font_family(font)));
+    }
+
+    #[test]
+    fn notification_links_accept_only_safe_web_urls_from_island() {
+        for value in ["https://example.com/a?q=1", "http://localhost:8000/"] {
+            let raw = serde_json::json!({"type":"openNotificationLink","url":value}).to_string();
+            assert!(matches!(parse_view_command(&raw, true), Some(Command::OpenNotificationLink(_))));
+            assert!(parse_view_command(&raw, false).is_none());
+        }
+        for value in ["javascript:alert(1)", "file:///etc/passwd", "https://user:pass@example.com/", "https://example.com/\n"] {
+            let raw = serde_json::json!({"type":"openNotificationLink","url":value}).to_string();
+            assert!(parse_view_command(&raw, true).is_none());
+        }
     }
 
     #[test]

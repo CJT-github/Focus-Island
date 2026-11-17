@@ -7,6 +7,9 @@ services:
     environment:
       RELAY_CONNECTION_KEY: ${RELAY_CONNECTION_KEY:?Run the initialization command first}
       WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:?Run the initialization command first}
+      RELAY_CHANNEL_FILE: /data/channels.json
+    volumes:
+      - relay_data:/data
     read_only: true
     cap_drop:
       - ALL
@@ -56,5 +59,6 @@ services:
         max-file: "2"
 
 volumes:
+  relay_data:
   caddy_data:
   caddy_config:

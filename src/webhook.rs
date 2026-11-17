@@ -1,5 +1,5 @@
 //! Bounded, authenticated incoming notifications. No task or command execution.
-use crate::state::WebhookSettings;
+use crate::state::{WebhookSettings, LocalWebhookChannel};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -22,7 +22,7 @@ static MESSAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub struct WebhookNotification {
     #[serde(rename = "type")]
     pub kind: String,
-    pub source: &'static str,
+    pub source: String,
     pub id: String,
     pub app: String,
     pub title: String,
@@ -76,7 +76,7 @@ pub fn validate_settings(settings: &WebhookSettings) -> Result<(), String> {
     Ok(())
 }
 
-struct Runtime { settings: WebhookSettings, epoch: u64, server_id: u64, listening: bool, error: String }
+struct Runtime { settings: WebhookSettings, channels:Vec<LocalWebhookChannel>, epoch: u64, server_id: u64, listening: bool, error: String }
 #[derive(Default)]
 struct Statistics { accepted: u64, last_received_at: Option<u64> }
 struct RateLimiter { start: Instant, count: usize }
@@ -100,7 +100,7 @@ enum PreparedKind { Disabled, Reuse, New(Server) }
 impl WebhookManager {
     pub fn new(delivery: impl Fn(WebhookEvent) -> bool + Send + Sync + 'static) -> Self {
         Self { shared: Arc::new(Shared {
-            runtime: Mutex::new(Runtime { settings: WebhookSettings::default(), epoch: 0, server_id: 0, listening: false, error: String::new() }),
+            runtime: Mutex::new(Runtime { settings: WebhookSettings::default(), channels:Vec::new(), epoch: 0, server_id: 0, listening: false, error: String::new() }),
             statistics: Mutex::new(Statistics::default()), limiter: Mutex::new(RateLimiter::new()), delivery: Arc::new(delivery),
         }), server: None }
     }
@@ -141,6 +141,12 @@ impl WebhookManager {
         if replacing { self.server = next; } // Old listener closes synchronously.
         if let Some(server) = &self.server { server.activate(); }
         self.status()
+    }
+
+    pub fn set_channels(&mut self, channels: &[LocalWebhookChannel]) {
+        let mut runtime=self.shared.runtime.lock().unwrap_or_else(|e|e.into_inner());
+        runtime.epoch=runtime.epoch.wrapping_add(1);
+        runtime.channels=channels.to_vec();
     }
 
     pub fn shutdown(&mut self) {
@@ -396,7 +402,7 @@ pub(crate) fn decode_notification(bytes: &[u8]) -> Result<WebhookNotification, H
     let title = field(request.title, 256, false)?;
     let body = field(request.body, 2048, true)?;
     if kind == "posted" && title.is_empty() && body.is_empty() { return Err(HttpError(400, "title or body required")); }
-    Ok(WebhookNotification { kind: kind.into(), source: "webhook", id, app: if app.is_empty() { "Webhook".into() } else { app }, title, body, time: timestamp() })
+    Ok(WebhookNotification { kind: kind.into(), source: "webhook".into(), id, app: if app.is_empty() { "Webhook".into() } else { app }, title, body, time: timestamp() })
 }
 fn timestamp() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64 }
 
@@ -420,21 +426,27 @@ fn receive_request(connection: &mut Connection, server_id: u64, shared: &Shared,
         if let Some(head) = parse_head(&bytes)? { break head; }
         read_more(&mut connection.stream, &mut bytes, HEADER_LIMIT, deadline, stop)?;
     };
-    let epoch = {
+    let (epoch,channel) = {
         let runtime = shared.runtime.lock().unwrap_or_else(|e| e.into_inner());
         if !runtime.listening || !runtime.settings.enabled || runtime.server_id != server_id { return Err(HttpError(503, "service unavailable")); }
-        if !token_equal(runtime.settings.token.as_bytes(), &head.credential)
-            || head.secondary.as_ref().is_some_and(|token| !token_equal(runtime.settings.token.as_bytes(), token)) {
+        let primary=token_equal(runtime.settings.token.as_bytes(), &head.credential);
+        let channel=if primary {None} else {
+            Some(runtime.channels.iter().find(|c|token_equal(c.token.as_bytes(),&head.credential))
+                .cloned().ok_or(HttpError(401,"authentication required"))?)
+        };
+        if head.secondary.as_ref().is_some_and(|token| !token_equal(&head.credential,token)) {
             return Err(HttpError(401, "authentication required"));
         }
-        runtime.epoch
+        if channel.as_ref().is_some_and(|c|!c.enabled) { return Err(HttpError(403,"webhook disabled")); }
+        (runtime.epoch,channel)
     };
     if !shared.limiter.lock().unwrap_or_else(|e| e.into_inner()).admit(Instant::now()) { return Err(HttpError(429, "rate limit exceeded")); }
     let expected = head.body_offset + head.content_length;
     if bytes.len() > expected { return Err(HttpError(400, "extra request data")); }
     while bytes.len() < expected { read_more(&mut connection.stream, &mut bytes, expected, deadline, stop)?; }
     if Instant::now() >= deadline { return Err(HttpError(400, "request timeout")); }
-    let notification = decode_notification(&bytes[head.body_offset..expected])?;
+    let mut notification = decode_notification(&bytes[head.body_offset..expected])?;
+    if let Some(channel)=channel {notification.source=format!("webhook-local-{}",channel.id);notification.app=channel.name;}
     Ok((epoch, notification))
 }
 
@@ -457,7 +469,7 @@ fn handle_connection(mut connection: Connection, server_id: u64, shared: &Shared
     respond(&mut connection.stream, code, &body, (Instant::now() + IO_TIMEOUT).min(connection.accepted + REQUEST_DEADLINE));
 }
 fn respond(stream: &mut TcpStream, code: u16, body: &serde_json::Value, deadline: Instant) {
-    let reason = match code { 202=>"Accepted",400=>"Bad Request",401=>"Unauthorized",404=>"Not Found",
+    let reason = match code { 202=>"Accepted",400=>"Bad Request",401=>"Unauthorized",403=>"Forbidden",404=>"Not Found",
         405=>"Method Not Allowed",413=>"Payload Too Large",415=>"Unsupported Media Type",429=>"Too Many Requests",_=>"Service Unavailable" };
     let body = body.to_string();
     let extra = match code { 401=>"WWW-Authenticate: Bearer\r\n",405=>"Allow: POST\r\n",429=>"Retry-After: 60\r\n",_=>"" };
@@ -527,6 +539,31 @@ mod tests {
     }
     fn send(settings: &WebhookSettings, body: &str) -> (u16, serde_json::Value, String) {
         exchange(settings.port, &request("/api/webhook", Some(&settings.token), body))
+    }
+
+    #[test]
+    fn independent_local_channels_keep_old_address_and_isolate_equal_ids() {
+        let (mut manager, settings, events)=started();
+        let a=LocalWebhookChannel{id:"1".repeat(32),name:"Alpha".into(),token:"b".repeat(64),enabled:true};
+        let b=LocalWebhookChannel{id:"2".repeat(32),name:"Beta".into(),token:"c".repeat(64),enabled:true};
+        manager.set_channels(&[a.clone(),b.clone()]);
+        for token in [&a.token,&b.token,&settings.token] {
+            assert_eq!(exchange(settings.port,&request(&format!("/api/webhook/{token}"),None,r#"{"id":"same","title":"hello"}"#)).0,202);
+        }
+        let first=events.recv_timeout(Duration::from_secs(1)).unwrap();
+        let second=events.recv_timeout(Duration::from_secs(1)).unwrap();
+        let legacy=events.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_ne!(first.notification.source,second.notification.source);
+        assert_eq!(first.notification.app,"Alpha");assert_eq!(second.notification.app,"Beta");
+        assert_eq!(legacy.notification.source,"webhook");
+        let mut disabled=a.clone();disabled.enabled=false;
+        manager.set_channels(&[disabled,b.clone()]);
+        assert!(!manager.is_current(&first));
+        assert_eq!(exchange(settings.port,&request(&format!("/api/webhook/{}",a.token),None,r#"{"title":"blocked"}"#)).0,403);
+        assert_eq!(exchange(settings.port,&request(&format!("/api/webhook/{}",b.token),None,r#"{"title":"allowed"}"#)).0,202);
+        manager.set_channels(&[a.clone()]);
+        assert_eq!(exchange(settings.port,&request(&format!("/api/webhook/{}",b.token),None,r#"{"title":"deleted"}"#)).0,401);
+        assert_eq!(send(&settings,r#"{"title":"legacy"}"#).0,202);
     }
 
     #[test]

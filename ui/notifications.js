@@ -15,11 +15,40 @@
     !invalidIdentity.test(value) && encoder.encode(value).length <= maximum ? value : '';
   const boundedInteger = (value, fallback, maximum) =>
     Number.isInteger(value) && value >= 1 && value <= maximum ? value : fallback;
-  const titleFor = message => message?.source === 'webhook' &&
+  const titleFor = message => (message?.source === 'webhook' || message?.source?.startsWith('webhook-local-')) &&
     message.title === '新消息' && message.body ? '' : message?.title || '';
   const setText = (node,value) => {
     if (node.textContent === value) return false;
     node.textContent = value;
+    return true;
+  };
+  const linkPattern = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>]+)/gi;
+  const parts = value => {
+    const result = []; let offset = 0;
+    for (const match of value.matchAll(linkPattern)) {
+      let url = match[2] || match[3], trailing = '';
+      if (!match[2]) { const suffix = url.match(/[.,!?;:，。！？；：]+$/); if (suffix) { trailing = suffix[0]; url = url.slice(0,-trailing.length); } }
+      try {
+        const parsed = new URL(url);
+        if (!['http:','https:'].includes(parsed.protocol) || parsed.username || parsed.password) continue;
+        result.push({text:value.slice(offset,match.index)}, {text:match[1] || '链接',url:parsed.href}, {text:trailing});
+        offset = match.index + match[0].length;
+      } catch (_) {}
+    }
+    result.push({text:value.slice(offset)});
+    return result;
+  };
+  const displayText = value => parts(value).map(part => part.text).join('');
+  const setRichText = (node,value) => {
+    if (node.dataset.rawText === value) return false;
+    node.dataset.rawText = value;
+    node.replaceChildren();
+    for (const part of parts(value)) {
+      if (!part.url) { if (part.text) node.append(document.createTextNode(part.text)); continue; }
+      const link = document.createElement('a');
+      link.className = 'notice-link'; link.href = part.url; link.textContent = part.text;
+      node.append(link);
+    }
     return true;
   };
   const setAttribute = (node,name,value) => {
@@ -91,8 +120,8 @@
       const title = titleFor(message);
       const body = message?.body === title ? '' : message?.body || '';
       setText(dom.app,message?.app || '通知');
-      setText(dom.title,title);
-      setText(dom.body,body);
+      setText(dom.title,displayText(title));
+      setText(dom.body,displayText(body));
       const layout = title && body ? 'detail' : body ? 'body' : title ? 'single' : 'source';
       if (dom.preview.dataset.layout !== layout) dom.preview.dataset.layout = layout;
       setText(dom.count,String(messages.size));
@@ -139,7 +168,7 @@
 
     function renderList() {
       // Preserve both DOM identity and scroll position when only the queue count changes.
-      const visible = Array.from(messages.entries()).slice(0,settings.listLimit);
+      const visible = Array.from(messages.entries()).reverse().slice(0,settings.listLimit);
       const keep = new Set(visible.map(([key]) => key));
       const scrollTop = dom.items.scrollTop;
       let changed = false;
@@ -157,8 +186,8 @@
           changed = true;
         }
         changed = setText(record.app,message.app || '通知') || changed;
-        changed = setText(record.title,titleFor(message)) || changed;
-        changed = setText(record.body,message.body) || changed;
+        changed = setRichText(record.title,titleFor(message)) || changed;
+        changed = setRichText(record.body,message.body) || changed;
         setAttribute(record.checkbox,'aria-label','关闭通知：' + (message.title || message.app || '通知'));
         if (dom.items.children[index] !== record.row) {
           dom.items.insertBefore(record.row,dom.items.children[index] || null);
@@ -232,6 +261,9 @@
         panel.style.width = '';
         panel.style.clipPath = '';
       }
+      dom.list.hidden = targetMode !== 'list';
+      dom.list.style.transform = '';
+      dom.list.style.opacity = '';
       dom.surface.style.transform = '';
       dom.surface.style.opacity = '';
       if (targetMode === 'none') {
@@ -259,7 +291,8 @@
         opacity:visible ? Number(getComputedStyle(dom.surface).opacity) : 0,
         mainTransform:getComputedStyle(dom.island).transform,
         mainRight:dom.island.getBoundingClientRect().left + 170 + (lastMainOpen ? 170 : 66),
-        preview:panel(dom.preview),count:panel(dom.count)
+        preview:panel(dom.preview),count:panel(dom.count),
+        list:{visible:!dom.list.hidden && getComputedStyle(dom.list).visibility !== 'hidden', transform:getComputedStyle(dom.list).transform, opacity:Number(getComputedStyle(dom.list).opacity)}
       };
     }
 
@@ -312,7 +345,8 @@
       cancelAnimation();
       if (geo.open !== lastMainOpen) mainSafetyUntil = Date.now() + MAIN_MOTION_MS;
       setGeometry(targetMode,geo,instant);
-      dom.list.hidden = targetMode !== 'list';
+      const listWasVisible = before.list.visible;
+      dom.list.hidden = targetMode !== 'list' && !listWasVisible;
       dom.list.style.visibility = '';
       dom.list.style.maxHeight = '280px';
       safeListHeight = height;
@@ -322,6 +356,17 @@
         mainSafetyUntil = 0;
         finishVisual(targetMode);
         return;
+      }
+      if (targetMode === 'list' || listWasVisible) {
+        dom.list.hidden = false;
+        const appearing = targetMode === 'list';
+        const fromTransform = listWasVisible ? before.list.transform : 'translateY(-8px) scale(.96)';
+        const fromOpacity = listWasVisible ? before.list.opacity : 0;
+        if ((previousMode === 'list') !== appearing || fromOpacity < .99) {
+          animate(dom.list,[{transform:fromTransform,opacity:fromOpacity},
+            {transform:appearing ? 'translateY(0) scale(1)' : 'translateY(-8px) scale(.96)',opacity:appearing ? 1 : 0}],
+            MOTION_MS,() => { if (revision === layoutRevision && !appearing) dom.list.hidden = true; });
+        }
       }
       const firstAppearance = !before.visible && targetMode !== 'none';
       const disappearing = targetMode === 'none';
@@ -380,9 +425,8 @@
       renderPreview();
       if (listOpen || rows.size) renderList();
       if (mode !== 'list') {
-        dom.list.hidden = true;
+        if (renderedMode !== 'list') dom.list.hidden = true;
         dom.list.style.visibility = '';
-        safeListHeight = 0;
       } else if (dom.list.hidden) {
         dom.list.hidden = false;
         dom.list.style.visibility = 'hidden';
@@ -551,7 +595,13 @@
       bound = true;
       dom.companion.addEventListener('click',event => {event.preventDefault();event.stopPropagation();toggleList();});
       dom.closeList.addEventListener('click',event => {event.preventDefault();event.stopPropagation();closeList();});
-      dom.list.addEventListener('click',event => event.stopPropagation());
+      dom.list.addEventListener('click',event => {
+        event.stopPropagation();
+        const link = event.target.closest?.('a.notice-link');
+        if (!link) return;
+        event.preventDefault();
+        options.openLink?.(link.href);
+      });
       document.addEventListener('keydown',event => {
         if (event.key !== 'Escape' || !listOpen) return;
         event.preventDefault();

@@ -273,3 +273,32 @@ test('initialization CLI accepts --domain without printing secrets or overwritin
   assert.equal(shown.stdout.trim(), values.RELAY_CONNECTION_KEY);
   assert.ok(!shown.stdout.includes(values.WEBHOOK_TOKEN));
 });
+
+test('independent webhook channels authenticate, isolate equal IDs and persist across restarts', async t => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(),'focus-relay-channels-'));
+  t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const channelFile=path.join(dir,'channels.json');
+  const app=await fixture(t,{channelFile});
+  const manage=body=>app.request('/api/relay/channels',{method:'POST',token:connectionKey,body});
+  assert.equal((await app.request('/api/relay/channels',{token:webhookToken})).status,401);
+  const a=(await manage({op:'create',name:'构建通知'})).body.channel;
+  const b=(await manage({op:'create',name:'服务器告警'})).body.channel;
+  assert.notEqual(a.token,b.token);
+  const post=(channel,body)=>app.request('/api/webhook/'+channel.token,{method:'POST',body});
+  assert.equal((await post(a,{id:'same',title:'A'})).status,202);
+  assert.equal((await post(b,{id:'same',title:'B'})).status,202);
+  assert.equal((await app.post({id:'same',title:'legacy'})).status,202);
+  const items=(await app.poll()).body.messages.map(item=>item.notification);
+  assert.equal(new Set(items.map(item=>item.id)).size,3);
+  assert.deepEqual(items.map(item=>item.app),['构建通知','服务器告警','Webhook']);
+  await manage({op:'update',id:a.id,enabled:false});
+  assert.equal((await post(a,{title:'blocked'})).status,403);
+  assert.equal((await post(b,{title:'accepted'})).status,202);
+  const second=await fixture(t,{channelFile});
+  const restored=await second.request('/api/relay/channels',{token:connectionKey});
+  assert.deepEqual(restored.body.channels.map(c=>[c.id,c.enabled]),[[a.id,false],[b.id,true]]);
+  assert.equal((await manage({op:'delete',id:a.id})).status,200);
+  assert.equal((await post(a,{title:'deleted'})).status,401);
+  assert.equal((await app.post({title:'legacy'})).status,202);
+});

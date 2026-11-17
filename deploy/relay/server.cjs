@@ -2,6 +2,7 @@
 const http = require('node:http');
 const crypto = require('node:crypto');
 const { TextDecoder } = require('node:util');
+const { createChannelStore } = require('./channel-store.cjs');
 
 const LIMITS = Object.freeze({ body: 16384, headers: 8192, queue: 200, batch: 20, ttlMs: 86400000, rate: 60, rateMs: 60000 });
 const hex64 = /^[a-fA-F0-9]{64}$/;
@@ -124,10 +125,11 @@ function respond(res, status, value) {
   res.writeHead(status, headers);
   res.end(body);
 }
-function createRelayServer({ connectionKey, webhookToken, now = Date.now } = {}) {
+function createRelayServer({ connectionKey, webhookToken, channelFile, now = Date.now } = {}) {
   if (!hex64.test(connectionKey || '') || !hex64.test(webhookToken || '') || connectionKey === webhookToken) {
     throw new Error('Configure two different 64-character hexadecimal keys');
   }
+  const channels = channelFile ? createChannelStore({ file:channelFile, defaultToken:webhookToken }) : null;
   const queue = new Map();
   let rateStarted = now();
   let rateCount = 0;
@@ -159,17 +161,52 @@ function createRelayServer({ connectionKey, webhookToken, now = Date.now } = {})
         respond(res, 200, { ok: true }); return;
       }
       if (req.method === 'POST' && typeof path === 'string' && path.startsWith('/api/webhook/')) {
-        if (!secretEqual(webhookToken, path.slice('/api/webhook/'.length))) throw new HttpError(401, 'authentication required');
+        const token = path.slice('/api/webhook/'.length);
+        const primary = secretEqual(webhookToken, token);
+        const channel = primary ? null : channels?.resolve(token);
+        if (!primary && !channel) throw new HttpError(401, 'authentication required');
+        if (channel && !channel.enabled) throw new HttpError(403, 'webhook disabled');
         if (req.headers.authorization !== undefined) throw new HttpError(400, 'use the dedicated webhook URL');
         const current = now();
         if (current < rateStarted || current - rateStarted >= LIMITS.rateMs) { rateStarted = current; rateCount = 0; }
         if (++rateCount > LIMITS.rate) throw new HttpError(429, 'rate limit exceeded');
         const notification = decodeNotification(await readJson(req), now());
+        const originalId = notification.id;
+        if (channel) {
+          const currentChannel=channels.resolve(token);
+          if (!currentChannel || !currentChannel.enabled) throw new HttpError(403, 'webhook disabled');
+          // Existing desktop protocol requires source=webhook and an ID <= 256 bytes.
+          // A deterministic scoped ID prevents same-ID collisions across channels.
+          notification.id = 'channel-' + channel.id + '-' + crypto.createHash('sha256').update(originalId).digest('hex');
+          notification.app = currentChannel.name;
+        }
         expire();
         if (queue.size >= LIMITS.queue) throw new HttpError(429, 'notification queue full');
         const deliveryId = crypto.randomBytes(32).toString('hex');
         queue.set(deliveryId, { deliveryId, notification });
-        respond(res, 202, { ok: true, code: 0, msg: 'success', id: notification.id }); return;
+        respond(res, 202, { ok: true, code: 0, msg: 'success', id: originalId }); return;
+      }
+      if ((req.method === 'GET' || req.method === 'POST') && path === '/api/relay/channels') {
+        authenticate(req);
+        if (!channels) throw new HttpError(503, 'channel management unavailable');
+        if (req.method === 'GET') {
+          if (req.headers['transfer-encoding'] !== undefined || Number(req.headers['content-length'] || 0) !== 0) throw new HttpError(400, 'GET body is not supported');
+          respond(res, 200, { channels:channels.list() }); return;
+        }
+        const body = await readJson(req);
+        if (!plainObject(body) || typeof body.op !== 'string') throw new HttpError(400, 'invalid channel operation');
+        let result;
+        try {
+          if (body.op === 'create') { keysOnly(body,['op','name']);result=channels.create(body.name); }
+          else if (body.op === 'update') { keysOnly(body,['op','id','name','enabled']);const changes={};if(owns(body,'name'))changes.name=body.name;if(owns(body,'enabled'))changes.enabled=body.enabled;result=channels.update(body.id,changes); }
+          else if (body.op === 'delete') { keysOnly(body,['op','id']);channels.remove(body.id);result=null; }
+          else throw new HttpError(400,'invalid channel operation');
+        } catch (error) {
+          if (error instanceof HttpError) throw error;
+          if (error.message === 'channel storage failed' || error.message === 'invalid channel store') throw new HttpError(503,'channel storage unavailable');
+          throw new HttpError(400,'invalid channel operation');
+        }
+        respond(res, 200, { ok:true,channel:result,channels:channels.list() });return;
       }
       if ((req.method === 'GET' && (path === '/api/relay/info' || path === '/api/relay/messages')) || (req.method === 'POST' && path === '/api/relay/ack')) {
         authenticate(req);
@@ -211,7 +248,7 @@ function createRelayServer({ connectionKey, webhookToken, now = Date.now } = {})
 }
 if (require.main === module) {
   try {
-    const server = createRelayServer({ connectionKey: process.env.RELAY_CONNECTION_KEY, webhookToken: process.env.WEBHOOK_TOKEN });
+    const server = createRelayServer({ connectionKey: process.env.RELAY_CONNECTION_KEY, webhookToken: process.env.WEBHOOK_TOKEN, channelFile:process.env.RELAY_CHANNEL_FILE });
     server.on('error', () => { process.stderr.write('Relay listener failed\n'); process.exitCode = 1; });
     server.listen(17893, '0.0.0.0', () => process.stdout.write('Relay listening on port 17893\n'));
     let stopping = false;

@@ -157,7 +157,7 @@ Get-FileHash -Algorithm SHA256 .\FocusIsland.exe
     # Exact allowlist only: never ship deploy/webhook/.env or recurse into deploy.
     foreach ($relative in @('deploy/webhook/Caddyfile', 'deploy/webhook/compose.yml',
         'deploy/webhook/README.md', 'deploy/webhook/.env.example', 'tools/webhook-tunnel.ps1',
-        'deploy/relay/server.cjs', 'deploy/relay/server.test.cjs', 'deploy/relay/init.cjs', 'deploy/relay/Dockerfile', 'deploy/relay/compose.yml', 'deploy/relay/Caddyfile', 'deploy/relay/.env.example', 'deploy/relay/.dockerignore', 'deploy/relay/README.md')) {
+        'deploy/relay/server.cjs', 'deploy/relay/server.test.cjs', 'deploy/relay/channel-store.cjs', 'deploy/relay/channel-store.test.cjs', 'deploy/relay/init.cjs', 'deploy/relay/Dockerfile', 'deploy/relay/compose.yml', 'deploy/relay/Caddyfile', 'deploy/relay/.env.example', 'deploy/relay/.dockerignore', 'deploy/relay/README.md')) {
         $extraSource = Assert-SourcePath (Join-Path $projectRoot $relative)
         $extraHash = (Get-FileHash -LiteralPath $extraSource -Algorithm SHA256).Hash.ToLowerInvariant()
         $destination = Assert-ChildPath (Join-Path $payloadPath $relative) $payloadPath

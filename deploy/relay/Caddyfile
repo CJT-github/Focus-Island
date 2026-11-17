@@ -54,11 +54,11 @@ https://{$WEBHOOK_DOMAIN} {
 	}
 	@reader {
 		method GET
-		path /api/relay/info /api/relay/messages
+		path /api/relay/info /api/relay/messages /api/relay/channels
 	}
 	@ack {
 		method POST
-		path /api/relay/ack
+		path /api/relay/ack /api/relay/channels
 	}
 	handle @delivery {
 		import relay_upstream

@@ -25,7 +25,7 @@ async function run(){
  try{
   const page=await makePage();
   assert.equal(await count(page,'webhookStatus'),1);
-  assert.deepEqual(await page.locator('#panelNav [data-panel-page]').evaluateAll(nodes=>nodes.map(node=>node.dataset.panelPage)),['timer','webhook','phone','preferences']);
+  assert.deepEqual(await page.locator('#panelNav [data-panel-page]').evaluateAll(nodes=>nodes.map(node=>node.dataset.panelPage)),['timer','webhook','phone','theme','preferences']);
   await click(page,'btnOpenWebhookPage');assert.equal(await count(page,'webhookStatus'),2);
   assert.equal(await page.getAttribute('#webhookPage','aria-hidden'),'false');
   assert.equal(await page.locator('#webhookEnabled').isChecked(),false);assert.equal(await page.inputValue('#webhookPort'),'17891');

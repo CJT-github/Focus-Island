@@ -94,7 +94,7 @@ function Get-PackageFiles {
         $item
     }
     # Relay deployment uses an exact allowlist; private .env never enters archives.
-    foreach ($name in @('server.cjs', 'server.test.cjs', 'init.cjs', 'Dockerfile', 'compose.yml', 'Caddyfile', '.env.example', '.dockerignore', 'README.md')) {
+    foreach ($name in @('server.cjs', 'server.test.cjs', 'channel-store.cjs', 'channel-store.test.cjs', 'init.cjs', 'Dockerfile', 'compose.yml', 'Caddyfile', '.env.example', '.dockerignore', 'README.md')) {
         Assert-NoReparse (Assert-SourcePath (Join-Path $projectRoot ('deploy/relay/' + $name)))
     }
     $toolsRoot = Assert-SourcePath (Join-Path $projectRoot 'tools')

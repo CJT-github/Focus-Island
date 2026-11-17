@@ -7,8 +7,8 @@ async function run(){
  const browser=await chromium.launch({headless:true,executablePath:process.env.BROWSER_EXE||'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
  const errors=[],checks=[],artifacts=[];
  const state={tasks:Array.from({length:12},(_,index)=>({id:'task-'+index,name:'Navigation task '+index,sec:1800,completionAction:{enabled:false,kind:'command',command:'',delaySec:10}})),current_id:'task-0',duration_sec:1800,settings:{showIdleClock:true,showIdleEyes:true,sound:false,notify:false,reduceMotion:true,topOffset:20},phone:{enabled:true,displaySeconds:8,hideContent:false,deviceAddress:'',deviceName:''}};
- const routes={timer:'settingsPage',webhook:'webhookPage',phone:'phonePage',preferences:'preferencesPage',create:'taskCreatePage',task:'taskSettingsPage'};
- const menu={timer:'btnOpenTimerPage',webhook:'btnOpenWebhookPage',phone:'btnOpenPhonePage',preferences:'btnOpenPreferencesPage'};
+ const routes={timer:'settingsPage',webhook:'webhookPage',phone:'phonePage',theme:'themePage',preferences:'preferencesPage',create:'taskCreatePage',task:'taskSettingsPage'};
+ const menu={timer:'btnOpenTimerPage',webhook:'btnOpenWebhookPage',phone:'btnOpenPhonePage',theme:'btnOpenThemePage',preferences:'btnOpenPreferencesPage'};
  async function makePage(viewport={width:560,height:660}){
   const page=await browser.newPage({viewport});page.on('pageerror',error=>errors.push(error.message));
   await page.addInitScript(()=>{window.messages=[];window.ipc={postMessage(value){messages.push(JSON.parse(value));}};});await page.goto('about:blank');
@@ -29,13 +29,15 @@ async function run(){
  try{
   if(!process.argv.includes('--layout-only')){
   const page=await makePage();await current(page,'timer');
-  assert.equal(await page.locator('#panelNav button[data-panel-page]').count(),4);
+  assert.equal(await page.locator('#panelNav button[data-panel-page]').count(),5);
   assert.equal(await page.locator('#settingsPage #completionActionSection').count(),0);
   assert.equal(await page.locator('#preferencesPage #inTopOffset').count(),1);
+  assert.equal(await page.locator('#themePage .theme-settings').count(),1);
+  assert.equal(await page.locator('#themePage #swEyes').count(),1);
   assert.equal(await page.locator('#preferencesPage #notificationsSettings #notificationDisplaySeconds').count(),1);
   assert.equal(await page.locator('#notificationsPage,#btnOpenNotificationsPage').count(),0);
-  assert.deepEqual(await page.locator('#panelNav [data-panel-page]').evaluateAll(nodes=>nodes.map(node=>node.dataset.panelPage)),['timer','webhook','phone','preferences']);
-  checks.push('Timer, Webhook, phone and preferences are four top-level routes; notification controls belong to the preferences group, with one active accessible page and parent-aware navigation.');
+  assert.deepEqual(await page.locator('#panelNav [data-panel-page]').evaluateAll(nodes=>nodes.map(node=>node.dataset.panelPage)),['timer','webhook','phone','theme','preferences']);
+  checks.push('Timer, Webhook, phone and preferences are five top-level routes; notification controls belong to the preferences group, with one active accessible page and parent-aware navigation.');
 
   await page.fill('#inH','7');await go(page,'preferences');await page.fill('#inTopOffset','94');
   await page.fill('#notificationDisplaySeconds','12');await go(page,'timer');assert.equal(await page.inputValue('#inH'),'7');
@@ -71,13 +73,18 @@ async function run(){
   await go(page,'phone');await page.evaluate(requestId=>__taskCreateResult({ok:true,taskId:'created',requestId,message:'Created'}),request.requestId);await current(page,'phone');await focusOn(page,'btnOpenPhonePage');assert.equal(await page.inputValue('#notificationDisplaySeconds'),'12');
   await go(page,'timer');await page.locator('#btnOpenTaskPage').click();assert.equal(await page.inputValue('#inTaskName'),'');assert.equal(await page.locator('#btnAddTask').isDisabled(),false);
   await go(page,'timer');await page.locator('.task__edit').first().click();await go(page,'preferences');await page.evaluate(s=>__applyState({...s,tasks:s.tasks.slice(1)},false),state);await current(page,'preferences');
-  checks.push('Late creation acknowledgements and task-list broadcasts update state without stealing the selected menu or keyboard focus.');await page.close();
+  checks.push('Late creation acknowledgements and task-list broadcasts update state without stealing the selected menu or keyboard focus.');
+  assert.equal(await page.locator('#preferencesPage #btnQuitApp').count(),1);
+  await page.locator('#btnQuitApp').click();
+  assert.equal(await page.evaluate(()=>messages.at(-1).type),'quit');
+  checks.push('The preferences exit button sends the existing quit command.');
+  await page.close();
   }
 
   await fs.mkdir(out,{recursive:true});
   for(const viewport of [{width:560,height:660},{width:340,height:620},{width:560,height:420},{width:340,height:360}]){
    const layout=await makePage(viewport);
-   for(const name of ['timer','webhook','phone','preferences','create','task']){
+   for(const name of ['timer','webhook','phone','theme','preferences','create','task']){
     if(name==='create'){await go(layout,'timer');await layout.locator('#btnOpenTaskPage').click();}
     else if(name==='task'){await go(layout,'timer');await layout.locator('.task__edit').first().click();}
     else await go(layout,name);
@@ -85,11 +92,11 @@ async function run(){
     const size=await layout.evaluate(id=>{const node=document.getElementById(id),nav=document.getElementById('panelNav'),box=node.getBoundingClientRect(),navBox=nav.getBoundingClientRect();return{scrollWidth:node.scrollWidth,clientWidth:node.clientWidth,docWidth:document.documentElement.scrollWidth,docHeight:document.documentElement.scrollHeight,box:{left:box.left,right:box.right,top:box.top,bottom:box.bottom},nav:{left:navBox.left,right:navBox.right,top:navBox.top,bottom:navBox.bottom},height:node.clientHeight};},routes[name]);
     assert(size.clientWidth>0&&size.height>40,JSON.stringify({viewport,name,size}));assert(size.scrollWidth<=size.clientWidth+1,JSON.stringify({viewport,name,size}));assert(size.docWidth<=viewport.width+1&&size.docHeight<=viewport.height+1,JSON.stringify({viewport,name,size}));
     assert(size.box.left>=0&&size.box.right<=viewport.width+1&&size.box.bottom<=viewport.height+1,JSON.stringify({viewport,name,size}));assert(size.nav.left>=0&&size.nav.right<=viewport.width+1&&size.nav.bottom<=viewport.height+1,JSON.stringify({viewport,name,size}));
-    if((viewport.width===560&&viewport.height===660&&['timer','webhook','phone','preferences'].includes(name))||(viewport.width===340&&viewport.height===620&&['timer','create'].includes(name))){
+    if((viewport.width===560&&viewport.height===660&&['timer','webhook','phone','theme','preferences'].includes(name))||(viewport.width===340&&viewport.height===620&&['timer','create'].includes(name))){
      await layout.locator('#'+routes[name]).evaluate(node=>node.scrollTop=0);const topShot='panel-'+viewport.width+'x'+viewport.height+'-'+name+'-top.png';await layout.screenshot({path:path.join(out,topShot),omitBackground:true,animations:'disabled'});artifacts.push(topShot);
     }
     await layout.locator('#'+routes[name]).evaluate(node=>node.scrollTop=node.scrollHeight);
-    const lastButton={timer:'#btnClear',phone:'#btnPhoneNotificationSettings',webhook:'#webhookPowerShellExample',preferences:'#btnTestNotification',create:'#btnAddTask',task:'#btnSaveAction'}[name];
+    const lastButton={timer:'#btnClear',phone:'#btnPhoneNotificationSettings',webhook:'#webhookPowerShellExample',theme:'input[name="eyeStyle"][value="random"]',preferences:'#btnQuitApp',create:'#btnAddTask',task:'#btnSaveAction'}[name];
     if(name==='webhook')await layout.locator(lastButton).evaluate(node=>{node.parentElement.open=true;});
     await layout.locator(lastButton).scrollIntoViewIfNeeded();
     const shot='panel-'+viewport.width+'x'+viewport.height+'-'+name+'.png';await layout.screenshot({path:path.join(out,shot),omitBackground:true,animations:'disabled'});artifacts.push(shot);

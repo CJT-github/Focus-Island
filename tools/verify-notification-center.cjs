@@ -13,9 +13,9 @@ async function run(){
  await page.clock.pauseAt(new Date('2030-01-01T12:00:01Z'));
  await page.setContent(template.replace('__VIEW__','island').replace('/*__GEO__*/','{}').replace('/*__STATE__*/','{}').replace('/*__CSS__*/',()=>css).replace('/*__JS__*/',()=>controller));
  await page.evaluate(()=>{
-  window.layoutCalls=[];window.layoutCallbacks=[];window.isMainOpen=false;window.reduce=false;
+  window.layoutCalls=[];window.layoutCallbacks=[];window.openedLinks=[];window.isMainOpen=false;window.reduce=false;
   window.center=createNotificationCenter({
-   mainOpen:()=>isMainOpen,reducedMotion:()=>reduce,
+   mainOpen:()=>isMainOpen,reducedMotion:()=>reduce,openLink:url=>openedLinks.push(url),
    closeMain:()=>{isMainOpen=false;center.syncMain();},
    sendLayout:(layout,callback)=>{layoutCalls.push(layout);layoutCallbacks.push(callback);}
   });
@@ -57,6 +57,15 @@ async function run(){
   for(let i=2;i<=7;i++)await emit(event('q'+i));
   await settle();
   assert.equal((await state()).mode,'list');assert.equal((await state()).count,7);
+  assert.deepEqual(await rows(),['Message q7','Message q6','Message q5','Message q4','Message q3']);
+  // Recreate the same fixtures in reverse arrival order for the wrap and refill cases.
+  await page.evaluate(()=>{
+    center.configure({enabled:false,displaySeconds:5,listLimit:5});
+    center.configure({enabled:true,displaySeconds:5,listLimit:5});
+    for(let i=7;i>=2;i--)center.receive({type:'posted',source:'phone',id:'q'+i,app:'Chat',title:'Message q'+i,body:'Body q'+i});
+    center.receive({type:'posted',source:'webhook',id:'first',app:'Chat',title:'Updated',body:'Body first'});
+    document.getElementById('noticeCompanion').click();
+  });await settle();
   assert.deepEqual(await rows(),['Updated','Message q2','Message q3','Message q4','Message q5']);
   const chineseBody='这是一段较长的中文通知正文，内容应自动换行并完整保留，方便在消息列表里阅读。'.repeat(5);
   const englishTitle='DeploymentNotificationWithoutWhitespace'.repeat(4);
@@ -113,7 +122,7 @@ async function run(){
   await emit(event('q2',{title:englishTitle,body:englishBody,app:'Webhook'}));await settle();
   assert((await exactNativeHeight())>shortHeight,'a longer replacement grows the native clipping again');
   await emit(event('q2'));await page.evaluate(()=>center.configure({enabled:true,displaySeconds:5,listLimit:5}));await settle();
-  checks.push('FIFO list keeps arrivals and checkbox refill; default label is hidden, type sits right, Chinese and unspaced English wrap fully within 280px scrolling, and replacements update native clipping height');
+  checks.push('Newest-first list keeps arrivals and checkbox refill; default label is hidden, type sits right, Chinese and unspaced English wrap fully within 280px scrolling, and replacements update native clipping height');
 
   await page.evaluate(()=>center.configure({enabled:true,displaySeconds:5,listLimit:2}));await settle();
   assert.equal((await rows()).length,2);
@@ -177,6 +186,25 @@ async function run(){
   checks.push('pill text adapts to title/body presence, preserves real phone and title-only labels, omits only Webhook placeholders, and keeps the type on the right');
 
   await page.evaluate(()=>{
+    center.configure({enabled:false,displaySeconds:5,listLimit:2});
+    center.configure({enabled:true,displaySeconds:5,listLimit:2});
+    for(let i=1;i<=3;i++)center.receive({type:'posted',source:'webhook',id:'link-'+i,app:'App',title:'Link '+i,body:i===3?'Visit https://example.com/a, or [Docs](https://example.org/doc)':'Text'});
+  });await settle();await click('#noticeCompanion');await settle();
+  assert.deepEqual(await rows(),['Link 3','Link 2']);
+  assert.equal(await page.locator('.notice-item-body').first().textContent(),'Visit 链接, or Docs');
+  assert.equal(await page.locator('.notice-link').count(),2);
+  assert.equal(await page.locator('.notice-item-copy').first().evaluate(node=>getComputedStyle(node).userSelect),'text');
+  await click('.notice-link');assert.deepEqual(await page.evaluate(()=>openedLinks),['https://example.com/a']);
+  await click('#btnCloseNoticeList');await ack();
+  assert.equal(await visible('#noticeList'),true,'list stays visible while closing');
+  await page.clock.runFor(100);await click('#noticeCompanion');await settle();
+  assert.equal(await visible('#noticeList'),true,'reopening interrupts closing without hiding the list');
+  await click('#noticeItems input');await settle();
+  assert.deepEqual(await rows(),['Link 2','Link 1']);
+  checks.push('newest first and older refill; named links require a click, text is selectable, and list close can be interrupted');
+
+
+  await page.evaluate(()=>{
     center.configure({enabled:false,displaySeconds:5,listLimit:5});
     center.configure({enabled:true,displaySeconds:5,listLimit:5});
     for(let i=0;i<8;i++)center.receive({type:'posted',source:'retain',id:'r'+i,app:'App',title:'Row '+i,body:'Readable text on several lines. '.repeat(6)});
@@ -186,8 +214,8 @@ async function run(){
     input.focus({preventScroll:true});items.scrollTop=80;
     window.retainedList={rows,input,scroll:items.scrollTop};
   });
-  await emit({type:'posted',source:'retain',id:'r2',app:'App',title:'New 2',body:'Readable text on several lines. '.repeat(6)});
-  await emit({type:'posted',source:'retain',id:'r8',app:'App',title:'Queued below visible rows',body:'Tail'});
+  await emit({type:'posted',source:'retain',id:'r5',app:'App',title:'New 2',body:'Readable text on several lines. '.repeat(6)});
+  await emit({type:'posted',source:'retain',id:'r0',app:'App',title:'Queued below visible rows',body:'Tail'});
   await settle();
   assert.deepEqual(await page.evaluate(()=>{
     const items=document.getElementById('noticeItems');

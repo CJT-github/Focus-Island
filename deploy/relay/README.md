@@ -40,7 +40,7 @@ Caddy 终止 TLS，自动申请/续期证书。Node 只在 Docker 内网的 `rel
 
 在电脑端 Webhook 的服务器连接设置中填写 `https://你的域名` 和上面读取的连接密钥，保存并开启；保持“通知框”开启。连接成功后，程序读取专属投递 URL。把这个 URL 填入外部系统的 Webhook 地址，选择 POST 和 `Content-Type: application/json`。
 
-支持飞书文本消息结构：
+连接成功后，可在“独立 Webhook”中为不同应用新增地址，并分别启用、停用或删除。原专属地址继续有效；新增地址与开关保存在 Docker 的 `relay_data` 数据卷中，备份和迁移时请保留该卷。删除入口会使对应地址失效。\n\n支持飞书文本消息结构：
 
 ```json
 {"msg_type":"text","content":{"text":"构建成功"}}

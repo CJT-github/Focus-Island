@@ -24,9 +24,43 @@
   const defaults = {
     tasks: [{id:'t1',name:'深度工作',sec:1500},{id:'t2',name:'阅读论文',sec:2700},{id:'t3',name:'代码评审',sec:900}],
     current_id:'t1', duration_sec:1500,
-    settings:{showHands:true,showSecond:true,showIdleClock:true,showIdleEyes:false,sound:true,notify:false,alwaysOnTop:true,reduceMotion:false,topOffset:20}
+    settings:{showHands:true,showSecond:true,showIdleClock:true,showIdleEyes:false,eyeStyle:'devil',sound:true,notify:false,alwaysOnTop:true,reduceMotion:false,topOffset:20}
   };
 
+  const themeDefaults={background:'#121925',accent:'#e8c268',textColor:'#f2f2f2',opacity:80,font:'default',fontSize:100,fontStyle:'normal',fontWeight:'normal'};
+  function normalizedTheme(value={}) {
+    if (!value || typeof value !== 'object') value={};
+    const color=(v,f)=>typeof v==='string' && /^#[0-9a-f]{6}$/i.test(v)?v.toLowerCase():f;
+    const number=(v,f,min,max)=>Number.isInteger(v)?Math.max(min,Math.min(max,v)):f;
+    return {background:color(value.background,themeDefaults.background),accent:color(value.accent,themeDefaults.accent),
+      textColor:color(value.textColor,themeDefaults.textColor),opacity:number(value.opacity,80,30,100),
+      font:typeof value.font==='string' && (['default','sans','serif','mono'].includes(value.font) || (value.font.startsWith('local:') && value.font.length>6 && value.font.length<=86 && !/[\u0000-\u001f\u007f-\u009f<>"'\\]/u.test(value.font)))?value.font:'default',
+      fontSize:number(value.fontSize,100,85,125),fontStyle:value.fontStyle==='italic'?'italic':'normal',
+      fontWeight:value.fontWeight==='bold'?'bold':'normal'};
+  }
+  const themeFonts={
+    default:['"Inter",-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif','"JetBrains Mono","SF Mono","Consolas",ui-monospace,monospace'],
+    sans:['"Segoe UI","Microsoft YaHei",system-ui,sans-serif','"Segoe UI","Microsoft YaHei",system-ui,sans-serif'],
+    serif:['"Georgia","Songti SC","SimSun",serif','"Georgia","Songti SC","SimSun",serif'],
+    mono:['"Consolas","Microsoft YaHei",monospace','"Consolas","Microsoft YaHei",monospace']
+  };
+  function applyTheme(value) {
+    const t=normalizedTheme(value),root=document.documentElement.style;
+    const set=(key,value)=>{const next=String(value);if(root.getPropertyValue(key)!==next)root.setProperty(key,next);};
+    const rgb=t.background.match(/[0-9a-f]{2}/gi).map(n=>parseInt(n,16)).join(',');
+    const textRgb=t.textColor.match(/[0-9a-f]{2}/gi).map(n=>parseInt(n,16));
+    const muted=factor=>'#'+textRgb.map(n=>Math.round(n*factor).toString(16).padStart(2,'0')).join('');
+    set('--theme-rgb',rgb);set('--theme-opacity',t.opacity/100);
+    set('--text',t.textColor);set('--text-2',muted(.78));set('--text-3',muted(.62));
+    const accentRgb=t.accent.match(/[0-9a-f]{2}/gi).map(n=>parseInt(n,16));
+    const accentShade=(factor,base)=>'#'+accentRgb.map(n=>Math.round(n*factor+base).toString(16).padStart(2,'0')).join('');
+    set('--theme-accent-rgb',accentRgb.join(','));set('--theme-text-rgb',textRgb.join(','));
+    set('--gold',t.accent);set('--gold-surface','linear-gradient(155deg,'+accentShade(.8,51)+','+t.accent+','+accentShade(.8,0)+')');
+    const family=t.font.startsWith('local:') ? '"'+t.font.slice(6)+'", "Microsoft YaHei", system-ui, sans-serif' : null;
+    set('--font',family || themeFonts[t.font][0]);set('--mono',family || themeFonts[t.font][1]);
+    set('--theme-size',t.fontSize/100);set('--theme-font-style',t.fontStyle);
+    set('--theme-font-weight',t.fontWeight==='bold'?'700':'500');
+  }
   const notificationDefaults={enabled:true,displaySeconds:5,listLimit:5};
   function normalizedNotifications(value={}) {
     return {enabled:typeof value.enabled==='boolean'?value.enabled:true,
@@ -65,6 +99,7 @@
   S.webhook=normalizedWebhook(S.webhook);
   S.relay=normalizedRelay(S.relay);
   S.settings = {...defaults.settings, ...S.settings};
+  S.settings.theme=normalizedTheme(S.settings.theme);
   const MAX_SEC = 359999;
   const duration = value => Math.min(MAX_SEC, Math.max(1, Math.trunc(Number(value) || 1500)));
   S.duration_sec = duration(S.duration_sec);
@@ -92,7 +127,11 @@
   let webhookStatus={phase:'disabled',message:'',endpoint:'',lanAddresses:[],acceptedCount:0,lastReceivedAt:null};
   let relayConfigPending=null,relayDraftDirty=false,relayHasConnectionKey=window.__STATE__?.relay?.hasConnectionKey===true,relayWebhookToken='',relayTokenOrigin='',relayTokenRevision=null,relayTokenQueried=false,relayEndpointVisible=false;
   let relayStatus={phase:'disabled',message:'',acceptedCount:0,lastReceivedAt:null};
+  let relayChannels=[],relayChannelsPending=null,relayChannelsOrigin='';
   let notificationCenter=null,noticeViewportPending=null,notificationsConfigPending=null,notificationsDraftDirty=false;
+  let themeDraft=null, selectedThemeFont=null, themePreviewFrame=null;
+  let fontListQuery=null, fontListSelection=null;
+  const installedFontNames=Array.isArray(window.__FONTS__)?window.__FONTS__.filter(name=>typeof name==='string' && name.length<=80 && normalizedTheme({font:'local:'+name}).font==='local:'+name):[];
 
   const el = Object.fromEntries([
     'island','compactTime','idleEyes','readoutTask','readoutDigits','readoutChip','miniRing','dialProgress',
@@ -100,10 +139,10 @@
     'taskList','presets','inH','inM','inS','durNote','inTaskName','inTaskMin','inTaskSec','taskNote',
     'swHands','swSecond','swIdleClock','swEyes','swSound','swNotify','swTop','swMotion',
     'inTopOffset','btnApplyTopOffset','topOffsetNote',
-    'btnClose','btnStart','btnReset2','btnClear','btnAddTask','btnApplyCustom','expanded',
+    'btnClose','btnQuitApp','btnStart','btnReset2','btnClear','btnAddTask','btnApplyCustom','expanded',
     'actionScope','actionEnabled','actionKind','actionCommand','actionCommandField','actionDelay','btnSaveAction','actionConfigNote',
     'panelAction','btnCancelPanelAction',
-    'panelNav','preferencesPage','btnOpenTimerPage','btnOpenPreferencesPage','timerNavStatus','phoneNavStatus',
+    'panelNav','preferencesPage','themePage','btnOpenTimerPage','btnOpenThemePage','btnOpenPreferencesPage','timerNavStatus','phoneNavStatus',
     'settingsPage','taskCreatePage','taskSettingsPage','taskSettingsDuration','btnOpenTaskPage','btnTaskBack','btnCancelTask','panelTitle',
     'actionKindTrigger','actionKindValue','actionKindMenu',
     'editTaskMin','editTaskSec','btnSaveTaskDuration','taskDurationNote',
@@ -111,12 +150,15 @@
     'createActionKindTrigger','createActionKindValue',
     'phonePage','btnOpenPhonePage','phoneEnabled','phoneHideContent','phoneConfigNote',
     'btnPhoneScan','phoneDevices','btnPhoneDisconnect','phoneStatus','phoneSupportNote','phoneAccessNote',
+    'themeFontSearch','themeFontList','themeFontStatus','themeBackground','themeAccent','themeTextColor','themeOpacity','themeOpacityValue','themeSize','themeSizeValue','themeBold','themeItalic','btnSaveTheme','btnResetTheme','themeNote',
     'notificationsSettings','notificationsEnabled',
     'notificationDisplaySeconds','notificationListLimit','btnSaveNotifications','notificationsConfigNote','btnTestNotification','btnPhoneNotificationSettings',
     'webhookPage','btnOpenWebhookPage','webhookNavStatus','webhookEnabled','webhookPort','webhookScopeLocal','webhookScopeLan',
     'webhookPublicBaseUrl','webhookPublicNote','btnRevealWebhookEndpoint','webhookScopeNote','webhookPhase','webhookStatusText','webhookActivity','webhookEndpoint','btnCopyWebhookEndpoint','webhookToken',
     'btnRevealWebhookToken','btnCopyWebhookToken','btnRotateWebhookToken','btnSaveWebhook','webhookConfigNote','btnTestWebhook',
     'relayEnabled','relayServiceUrl','relayConnectionKey','relayKeyNote','btnSaveRelay','relayConfigNote','relayPhase','relayStatusText','relayActivity','relayEndpoint','btnRevealRelayEndpoint','btnCopyRelayEndpoint','relayCopyNote',
+    'relayChannelName','btnCreateRelayChannel','btnRefreshRelayChannels','relayChannelsNote','relayChannelList',
+    'localChannelName','btnCreateLocalChannel','btnRefreshLocalChannels','localChannelsNote','localChannelList',
     'webhookCopyNote','webhookTestNote','webhookCurlExample','webhookPowerShellExample','webhookLanAddresses','webhookNotificationNote','btnWebhookNotifications'
   ].map(id => [id, $('#'+id)]));
 
@@ -125,6 +167,7 @@
     timer:{element:'settingsPage',title:'倒计时',menu:'btnOpenTimerPage'},
     webhook:{element:'webhookPage',title:'Webhook',menu:'btnOpenWebhookPage'},
     phone:{element:'phonePage',title:'手机通知',menu:'btnOpenPhonePage'},
+    theme:{element:'themePage',title:'主题',menu:'btnOpenThemePage'},
     preferences:{element:'preferencesPage',title:'通用设置',menu:'btnOpenPreferencesPage'},
     create:{element:'taskCreatePage',title:'新增任务',parent:'timer'},
     task:{element:'taskSettingsPage',title:'任务设置',parent:'timer'}
@@ -216,6 +259,76 @@
     webhookTokenVisible=false;webhookEndpointVisible=false;
     el.webhookCopyNote.textContent='';
   }
+  function requestRelayChannels(operation) {
+    if(!isPanel || relayChannelsPending)return;
+    if(!S.relay.enabled || relayStatus.phase!=='connected') {el.relayChannelsNote.textContent='请先连接服务器。';return;}
+    const requestId=++webhookSequence;
+    const pending={requestId,origin:S.relay.serviceUrl,timer:null};
+    relayChannelsPending=pending;
+    el.relayChannelsNote.textContent='正在处理…';
+    pending.timer=setTimeout(()=>{if(relayChannelsPending!==pending)return;relayChannelsPending=null;el.relayChannelsNote.textContent='请求超时，请刷新后重试。';},8000);
+    send({type:'relayChannels',operation,requestId});
+  }
+  function renderRelayChannels() {
+    if(!isPanel)return;
+    el.relayChannelList.replaceChildren();
+    for(const channel of relayChannels) {
+      const row=document.createElement('div');row.className='relay-channel-row';
+      const title=document.createElement('strong');title.textContent=channel.name;
+      const state=document.createElement('span');state.className='relay-channel-state';state.textContent=channel.enabled?'已开启':'已关闭';
+      const address=document.createElement('input');address.className='webhook-value';address.type='password';address.readOnly=true;address.value=relayChannelsOrigin+'/api/webhook/'+channel.token;address.setAttribute('aria-label',channel.name+' 的地址');
+      const actions=document.createElement('div');actions.className='relay-channel-actions';
+      for(const [action,label] of [['reveal','显示'],['copy','复制地址'],['toggle',channel.enabled?'关闭':'开启'],['delete','删除']]) {
+        const button=document.createElement('button');button.type='button';button.className='btn btn--sm';button.dataset.channelAction=action;button.dataset.channelId=channel.id;button.textContent=label;actions.append(button);
+      }
+      row.append(title,state,address,actions);el.relayChannelList.append(row);
+    }
+  }
+  window.__relayChannelsResult=payload=>{
+    if(!isPanel || !relayChannelsPending || payload?.requestId!==relayChannelsPending.requestId)return;
+    const pending=relayChannelsPending;clearTimeout(pending.timer);relayChannelsPending=null;
+    if(pending.origin!==S.relay.serviceUrl)return;
+    if(!payload.ok){el.relayChannelsNote.textContent=webhookText(payload.message)||'操作失败，请重试。';return;}
+    const data=payload.data,items=data?.channels;
+    if(!Array.isArray(items) || items.length>32 || items.some(c=>!c || !/^[a-f0-9]{32}$/.test(c.id) || !/^[a-f0-9]{64}$/.test(c.token) || typeof c.name!=='string' || typeof c.enabled!=='boolean')){
+      el.relayChannelsNote.textContent='服务器返回的入口列表无效。';return;
+    }
+    relayChannels=items.map(c=>({id:c.id,name:c.name,token:c.token,enabled:c.enabled}));
+    relayChannelsOrigin=pending.origin;renderRelayChannels();el.relayChannelsNote.textContent=items.length?'已加载 '+items.length+' 个独立入口。':'暂无独立入口。';
+    if(data.channel && data.channel.id)el.relayChannelName.value='';
+  };
+  let localChannels=[],localChannelsPending=null;
+  function requestLocalChannels(operation) {
+    if(!isPanel || localChannelsPending)return;
+    const requestId=++webhookSequence,pending={requestId};
+    localChannelsPending=pending;el.localChannelsNote.textContent='正在处理…';
+    pending.timer=setTimeout(()=>{if(localChannelsPending===pending){localChannelsPending=null;el.localChannelsNote.textContent='请求超时，请刷新后重试。';}},8000);
+    send({type:'localWebhookChannels',operation,requestId});
+  }
+  function renderLocalChannels() {
+    if(!isPanel)return;
+    el.localChannelList.replaceChildren();
+    for(const channel of localChannels) {
+      const row=document.createElement('div');row.className='relay-channel-row';
+      const title=document.createElement('strong');title.textContent=channel.name;
+      const state=document.createElement('span');state.className='relay-channel-state';state.textContent=channel.enabled?'已开启':'已关闭';
+      const address=document.createElement('input');address.className='webhook-value';address.type='password';address.readOnly=true;address.value=webhookBaseEndpoint()+'/'+channel.token;address.setAttribute('aria-label',channel.name+' 的地址');
+      const actions=document.createElement('div');actions.className='relay-channel-actions';
+      for(const [action,label] of [['reveal','显示'],['copy','复制地址'],['toggle',channel.enabled?'关闭':'开启'],['delete','删除']]) {
+        const button=document.createElement('button');button.type='button';button.className='btn btn--sm';button.dataset.channelAction=action;button.dataset.channelId=channel.id;button.textContent=label;actions.append(button);
+      }
+      row.append(title,state,address,actions);el.localChannelList.append(row);
+    }
+  }
+  window.__localWebhookChannelsResult=payload=>{
+    if(!isPanel || !localChannelsPending || payload?.requestId!==localChannelsPending.requestId)return;
+    clearTimeout(localChannelsPending.timer);localChannelsPending=null;
+    if(!payload.ok){el.localChannelsNote.textContent=webhookText(payload.message)||'操作失败，请重试。';return;}
+    const items=payload.channels;
+    if(!Array.isArray(items) || items.length>32 || items.some(c=>!c || !/^[a-f0-9]{32}$/.test(c.id) || !/^[a-f0-9]{64}$/.test(c.token) || typeof c.name!=='string' || typeof c.enabled!=='boolean')){el.localChannelsNote.textContent='入口列表无效。';return;}
+    localChannels=items;renderLocalChannels();el.localChannelsNote.textContent=items.length?'已加载 '+items.length+' 个独立入口。':'暂无独立入口。';
+    el.localChannelName.value='';
+  };
   function relayEndpoint() {
     return relayStatus.phase==='connected' && S.relay.enabled && S.relay.serviceUrl && relayTokenOrigin===S.relay.serviceUrl && relayWebhookToken?
       S.relay.serviceUrl+'/api/webhook/'+relayWebhookToken:'';
@@ -274,6 +387,7 @@
     }
     const nextPhase=['disabled','connecting','connected','reconnecting','error'].includes(payload.phase)?payload.phase:'disabled';
     if(nextPhase!=='connected'||relayStatus.phase!=='connected'){relayWebhookToken='';relayTokenOrigin='';relayTokenQueried=false;relayEndpointVisible=false;}
+    if(nextPhase!=='connected' || (relayChannelsOrigin && relayChannelsOrigin!==S.relay.serviceUrl)){relayChannels=[];relayChannelsOrigin='';renderRelayChannels();}
     if(payload.settings){
       const settings=normalizedRelay(payload.settings);
       if(settings.serviceUrl!==S.relay.serviceUrl||(relayTokenOrigin&&settings.serviceUrl!==relayTokenOrigin)||!settings.enabled){relayWebhookToken='';relayTokenOrigin='';relayTokenQueried=false;relayEndpointVisible=false;}
@@ -289,6 +403,7 @@
       message:webhookText(payload.message),acceptedCount:Number.isSafeInteger(payload.acceptedCount)&&payload.acceptedCount>=0?payload.acceptedCount:0,
       lastReceivedAt:typeof payload.lastReceivedAt==='number'||typeof payload.lastReceivedAt==='string'?payload.lastReceivedAt:null};
     renderWebhookPanel();
+    if(relayStatus.phase==='connected' && panelPage==='webhook' && !relayChannelsOrigin && !relayChannelsPending)requestRelayChannels({op:'list'});
     if(relayStatus.phase==='connected'&&!relayWebhookToken&&!relayTokenQueried){relayTokenQueried=true;send({type:'relayStatus'});}
   };
   window.__relayConfigResult=payload=>{
@@ -324,8 +439,15 @@
     const hint=scope==='lan'?'同一局域网的设备可访问；只在信任的网络开启。':'仅此电脑上的应用和脚本可以访问。';
     return hint+(changeNeedsRestart?' 切换范围前，请先关闭服务并保存，或同时更换端口。':'');
   }
+  function hideChannelAddresses() {
+    for(const list of [el.localChannelList,el.relayChannelList]) for(const row of list.querySelectorAll('.relay-channel-row')) {
+      const input=row.querySelector('input'),button=row.querySelector('[data-channel-action="reveal"]');
+      if(input)input.type='password';if(button)button.textContent='显示';
+    }
+  }
   function renderWebhookPanel() {
     if(!isPanel)return;
+    for(const [index,input] of Array.from(el.localChannelList.querySelectorAll('.relay-channel-row input')).entries()) if(localChannels[index])input.value=webhookBaseEndpoint()+'/'+localChannels[index].token;
     const busy=!!webhookConfigPending;
     if(!webhookDraftDirty && !busy){
       el.webhookEnabled.checked=S.webhook.enabled;
@@ -727,9 +849,9 @@
     el[route.element].scrollTop=panelScrollPositions.get(page) || 0;
     if (page==='task') {renderTaskDuration();renderActionConfig();}
     renderActionStatus();renderPhonePanel();
-    if(page!=='webhook'){webhookTokenVisible=false;webhookEndpointVisible=false;relayEndpointVisible=false;}
+    if(page!=='webhook'){webhookTokenVisible=false;webhookEndpointVisible=false;relayEndpointVisible=false;hideChannelAddresses();}
     renderWebhookPanel();
-    if(page==='webhook')requestWebhookStatus();
+    if(page==='webhook'){requestLocalChannels({op:'list'});requestWebhookStatus();if(S.relay.enabled && relayStatus.phase==='connected')requestRelayChannels({op:'list'});}
     if (!focus) return;
     // Returning from a task restores its initiating control and list position.
     const returning=page==='timer' && panelRoutes[previous].parent==='timer';
@@ -978,12 +1100,57 @@
       swNotify:'notify',swTop:'alwaysOnTop',swMotion:'reduceMotion'
     })) el[id].checked = !!S.settings[key];
     el.swSecond.disabled = !S.settings.showHands;
+    for(const radio of document.querySelectorAll('input[name="eyeStyle"]')) radio.checked=radio.value===(S.settings.eyeStyle || 'devil');
     // Position and duration edits are independent of unrelated state broadcasts.
     if (!topOffsetDraftDirty) el.inTopOffset.value = S.settings.topOffset;
     renderTasks();reconcileTaskEditors();renderTaskDuration();renderActionConfig();renderActionStatus();
   }
+  function renderTheme() {
+    if(themePreviewFrame!==null){cancelAnimationFrame(themePreviewFrame);themePreviewFrame=null;}
+    const theme=themeDraft || normalizedTheme(S.settings.theme);
+    applyTheme(theme);
+    if (!isPanel) return;
+    el.themeBackground.value=theme.background;el.themeAccent.value=theme.accent;el.themeTextColor.value=theme.textColor;
+    el.themeOpacity.value=theme.opacity;el.themeOpacityValue.value=theme.opacity+'%';
+    el.themeSize.value=theme.fontSize;el.themeSizeValue.value=theme.fontSize+'%';
+    el.themeBold.checked=theme.fontWeight==='bold';el.themeItalic.checked=theme.fontStyle==='italic';
+    selectedThemeFont=theme.font;
+    for(const radio of document.querySelectorAll('input[name="themeFont"]')) radio.checked=radio.value===theme.font;
+    renderFontLibrary();
+  }
+  function renderFontLibrary() {
+    if(!isPanel)return;
+    const query=el.themeFontSearch.value.trim().toLocaleLowerCase();
+    if(query===fontListQuery && selectedThemeFont===fontListSelection)return;
+    fontListQuery=query;fontListSelection=selectedThemeFont;
+    const shown=installedFontNames.filter(name=>name.toLocaleLowerCase().includes(query));
+    const scroll=el.themeFontList.scrollTop;
+    el.themeFontList.replaceChildren();
+    for(const name of shown) {
+      const button=document.createElement('button');button.type='button';button.className='font-option';button.dataset.font=name;
+      button.textContent=name;button.style.fontFamily='"'+name+'",sans-serif';
+      button.setAttribute('aria-pressed',String(selectedThemeFont==='local:'+name));el.themeFontList.append(button);
+    }
+    el.themeFontList.scrollTop=scroll;
+    const selected=selectedThemeFont?.startsWith('local:')?selectedThemeFont.slice(6):'';
+    el.themeFontStatus.textContent=selected && !installedFontNames.includes(selected)?'已保存字体在此设备不可用，将使用系统回退字体。':
+      installedFontNames.length?('本机字体 '+shown.length+' / '+installedFontNames.length+(selected?' · 已选 '+selected:'')):'未检测到系统字体，可使用上方通用字体。';
+  }
+  function readThemeDraft() {
+    themeDraft=normalizedTheme({background:el.themeBackground.value,accent:el.themeAccent.value,textColor:el.themeTextColor.value,
+      opacity:Number(el.themeOpacity.value),fontSize:Number(el.themeSize.value),
+      font:selectedThemeFont || document.querySelector('input[name="themeFont"]:checked')?.value,
+      fontStyle:el.themeItalic.checked?'italic':'normal',fontWeight:el.themeBold.checked?'bold':'normal'});
+    el.themeOpacityValue.value=themeDraft.opacity+'%';el.themeSizeValue.value=themeDraft.fontSize+'%';
+    for(const radio of document.querySelectorAll('input[name="themeFont"]')) radio.checked=radio.value===themeDraft.font;
+    renderFontLibrary();
+    if(themePreviewFrame===null)themePreviewFrame=requestAnimationFrame(()=>{
+      themePreviewFrame=null;if(themeDraft)applyTheme(themeDraft);
+    });
+    el.themeNote.textContent='预览中，保存后同步到灵动岛。';
+  }
   function renderAll() {
-    renderState(); renderTime(); renderPanel();renderPhonePanel();renderNotificationsPanel();renderWebhookPanel();reconcileNotifications();
+    renderTheme();renderState(); renderTime(); renderPanel();renderPhonePanel();renderNotificationsPanel();renderWebhookPanel();reconcileNotifications();
     el.island.classList.toggle('is-hide-hands',!S.settings.showHands);
     document.body.classList.toggle('reduce-motion',!!S.settings.reduceMotion);
     if (!isPanel) scheduleClock();
@@ -1186,8 +1353,12 @@
     } else stopIdleCycle();
     if (idleEyesActive) return;
     idleEyesActive=true;
+    const variants=['devil','heart','sleep','star','cute'];
+    const chosen=S.settings.eyeStyle==='random'?variants[Math.floor(Math.random()*variants.length)]:S.settings.eyeStyle;
+    el.idleEyes.dataset.style=variants.includes(chosen)?chosen:'devil';
     el.island.classList.add('is-idle-eyes');
-    moveIdleEyes();blinkIdleEyes();scheduleIdleFollow(true);
+    if (el.idleEyes.dataset.style!=='sleep') {moveIdleEyes();blinkIdleEyes();scheduleIdleFollow(true);}
+    if (S.settings.eyeStyle==='random') queueIdleEyes(()=>{stopIdleEyes();syncIdleEyes();},randomBetween(12000,20000));
   }
 
 
@@ -1523,10 +1694,42 @@
       node.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.isComposing&&!event.repeat){event.preventDefault();saveRelayConfig();}});
     }
     el.btnSaveRelay.addEventListener('click',saveRelayConfig);
+    el.btnRefreshLocalChannels.addEventListener('click',()=>requestLocalChannels({op:'list'}));
+    el.btnCreateLocalChannel.addEventListener('click',()=>{
+      const name=el.localChannelName.value.trim();
+      if(!name){el.localChannelsNote.textContent='请填写入口名称。';return;}
+      requestLocalChannels({op:'create',name});
+    });
+    el.localChannelList.addEventListener('click',event=>{
+      const button=event.target.closest('button[data-channel-action]');if(!button)return;
+      const channel=localChannels.find(c=>c.id===button.dataset.channelId);if(!channel)return;
+      const input=button.closest('.relay-channel-row').querySelector('input');
+      if(button.dataset.channelAction==='reveal'){input.type=input.type==='password'?'text':'password';button.textContent=input.type==='password'?'显示':'隐藏';}
+      else if(button.dataset.channelAction==='copy')copyWebhookValue(input.value,input,'Webhook 地址',el.localChannelsNote);
+      else if(button.dataset.channelAction==='toggle')requestLocalChannels({op:'update',id:channel.id,enabled:!channel.enabled});
+      else if(button.dataset.channelAction==='delete' && window.confirm('删除后，此地址将失效。确定删除？'))requestLocalChannels({op:'delete',id:channel.id});
+    });
+    el.btnRefreshRelayChannels.addEventListener('click',()=>requestRelayChannels({op:'list'}));
+    el.btnCreateRelayChannel.addEventListener('click',()=>{
+      const name=el.relayChannelName.value.trim();
+      if(!name || Array.from(name).length>40 || /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(name)){el.relayChannelsNote.textContent='请输入 1–40 个字符的名称。';return;}
+      requestRelayChannels({op:'create',name});
+    });
+    el.relayChannelList.addEventListener('click',event=>{
+      const button=event.target.closest('button[data-channel-action]'),channel=button && relayChannels.find(c=>c.id===button.dataset.channelId);
+      if(!channel || relayChannelsOrigin!==S.relay.serviceUrl)return;
+      const input=button.closest('.relay-channel-row').querySelector('input');
+      if(button.dataset.channelAction==='reveal') {input.type=input.type==='password'?'text':'password';button.textContent=input.type==='password'?'显示':'隐藏';}
+      else if(button.dataset.channelAction==='copy') {
+        copyWebhookValue(input.value,input,'Webhook 地址',el.relayChannelsNote);
+      } else if(button.dataset.channelAction==='toggle') requestRelayChannels({op:'update',id:channel.id,enabled:!channel.enabled});
+      else if(button.dataset.channelAction==='delete' && window.confirm('删除后，此地址将失效。确定删除？')) requestRelayChannels({op:'delete',id:channel.id});
+    });
     el.btnRevealRelayEndpoint.addEventListener('click',()=>{relayEndpointVisible=!relayEndpointVisible;renderRelayPanel();});
     el.btnCopyRelayEndpoint.addEventListener('click',()=>copyWebhookValue(el.relayEndpoint.value,el.relayEndpoint,'外部 Webhook 地址',el.relayCopyNote));
     const hideRelayEndpoint=()=>{relayEndpointVisible=false;el.relayEndpoint.type='password';el.btnRevealRelayEndpoint.textContent='显示';el.btnRevealRelayEndpoint.setAttribute('aria-pressed','false');};
     window.addEventListener('blur',hideRelayEndpoint);window.addEventListener('pagehide',hideRelayEndpoint);
+    window.addEventListener('blur',hideChannelAddresses);window.addEventListener('pagehide',hideChannelAddresses);
     el.webhookEnabled.addEventListener('change',markWebhookDraft);
     el.webhookPort.addEventListener('input',markWebhookDraft);
     el.webhookPublicBaseUrl.addEventListener('input',markWebhookDraft);
@@ -1558,6 +1761,18 @@
       node.addEventListener('input',()=>{notificationsDraftDirty=true;node.setAttribute('aria-invalid','false');el.notificationsConfigNote.textContent='尚未保存';el.notificationsConfigNote.classList.remove('is-error');});
       node.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.isComposing&&!e.repeat){e.preventDefault();saveNotificationsConfig();}});
     }
+    for(const node of [el.themeBackground,el.themeAccent,el.themeTextColor,el.themeOpacity,el.themeSize,el.themeBold,el.themeItalic])
+      node.addEventListener('input',readThemeDraft);
+    for(const radio of document.querySelectorAll('input[name="themeFont"]')) radio.addEventListener('input',()=>{selectedThemeFont=radio.value;readThemeDraft();});
+    el.themeFontSearch.addEventListener('input',renderFontLibrary);
+    el.themeFontList.addEventListener('click',event=>{
+      const button=event.target.closest('button[data-font]');if(!button)return;
+      const name=button.dataset.font;selectedThemeFont='local:'+name;readThemeDraft();
+      [...el.themeFontList.children].find(node=>node.dataset.font===name)?.focus({preventScroll:true});
+    });
+    el.btnResetTheme.addEventListener('click',()=>{themeDraft={...themeDefaults};renderTheme();el.themeNote.textContent='已恢复默认预览，保存后生效。';});
+    for(const radio of document.querySelectorAll('input[name="eyeStyle"]')) radio.addEventListener('change',()=>{if(!radio.checked)return;S.settings.eyeStyle=radio.value;send({type:'updateSettings',settings:{...S.settings}});});
+    el.btnSaveTheme.addEventListener('click',()=>{S.settings.theme=normalizedTheme(themeDraft || S.settings.theme);themeDraft=null;renderTheme();send({type:'updateSettings',settings:{...S.settings}});el.themeNote.textContent='主题已应用。';});
     el.btnSaveNotifications.addEventListener('click',saveNotificationsConfig);
     el.btnTestNotification.addEventListener('click',()=>send({type:'notificationTest'}));
     for(const input of [el.phoneEnabled,el.phoneHideContent])input.addEventListener('change',savePhoneConfig);
@@ -1604,6 +1819,7 @@
     el.btnReset2.addEventListener('click',()=>send({type:'resetTimer'}));
     el.btnClear.addEventListener('click',()=>send({type:'clearTasks'}));
     el.btnClose.addEventListener('click',()=>{closeActionKindMenu();send({type:'hidePanel'});});
+    el.btnQuitApp.addEventListener('click',()=>send({type:'quit'}));
     document.addEventListener('keydown',e=>{
       if(e.key!=='Escape' || e.isComposing || e.defaultPrevented)return;
       e.preventDefault();
@@ -1622,8 +1838,10 @@
 
   window.__applyState = (state,resetTimer=false) => {
     if (!state) return;
-    const previousDuration = S.duration_sec,previousTaskId = S.current_id;
+    const previousDuration = S.duration_sec,previousTaskId = S.current_id,previousEyeStyle=S.settings.eyeStyle;
     S = {...S,...state,settings:{...S.settings,...state.settings},phone:normalizedPhone({...S.phone,...state.phone}),notifications:normalizedNotifications({...S.notifications,...state.notifications}),webhook:normalizedWebhook({...S.webhook,...state.webhook}),relay:normalizedRelay({...S.relay,...state.relay})};
+    S.settings.theme=normalizedTheme(S.settings.theme);
+    if (!isPanel && previousEyeStyle!==S.settings.eyeStyle) stopIdleEyes();
     S.duration_sec = duration(S.duration_sec);
     if (resetTimer || S.duration_sec!==previousDuration || S.current_id!==previousTaskId) {
       durationDraftDirty=false;
@@ -1702,7 +1920,7 @@
   window.__checkHandGeometry = handGeometry;
 
   if(!isPanel){
-    notificationCenter=window.createNotificationCenter({sendLayout:requestNotificationLayout,mainOpen:()=>requestedOpen,closeMain:closeIsland,reducedMotion,onPresenceChange:scheduleClock});
+    notificationCenter=window.createNotificationCenter({openLink:url=>send({type:'openNotificationLink',url}),sendLayout:requestNotificationLayout,mainOpen:()=>requestedOpen,closeMain:closeIsland,reducedMotion,onPresenceChange:scheduleClock});
     notificationCenter.bind();
   }
   initializeActionKinds();buildDial();renderAll();bindIsland();bindPanel();

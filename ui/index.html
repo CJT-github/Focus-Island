@@ -7,6 +7,7 @@
 <style>/*__CSS__*/</style>
 </head>
 <body data-view="__VIEW__">
+<script>window.__FONTS__ = /*__FONTS__*/ null;</script>
 
 <!-- ============================================================
      灵动岛 · 独立悬浮小药丸
@@ -127,6 +128,10 @@
             <svg class="panel-nav__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="3"/><path d="M10 5h4M11 18h2"/><path d="m10 10 4 4-2 2V8l2 2-4 4"/></svg>
             <span class="panel-nav__copy"><span class="panel-nav__name">手机通知</span><span class="panel-nav__status" id="phoneNavStatus">未连接</span></span>
           </button>
+          <button class="panel-nav__item" id="btnOpenThemePage" data-panel-page="theme" aria-controls="themePage">
+            <svg class="panel-nav__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="8" cy="9" r="1"/><circle cx="13" cy="7.5" r="1"/><circle cx="16.5" cy="11" r="1"/><path d="M12 21c-1.8-1.3-1.5-3.3 0-4.2 1.3-.7 2.7-.4 3.7-1.1"/></svg>
+            <span class="panel-nav__copy"><span class="panel-nav__name">主题</span><span class="panel-nav__status">外观与眼睛</span></span>
+          </button>
           <button class="panel-nav__item" id="btnOpenPreferencesPage" data-panel-page="preferences" aria-controls="preferencesPage">
             <svg class="panel-nav__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h5m4 0h7M4 17h9m4 0h3"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="17" r="2"/></svg>
             <span class="panel-nav__copy"><span class="panel-nav__name">通用设置</span><span class="panel-nav__status">外观与提醒</span></span>
@@ -167,6 +172,48 @@
         </div>
       </section>
     </div>
+    <section class="panel__scroll panel-page theme-page" id="themePage" aria-hidden="true" inert>
+      <div class="page-intro"><h1>你的专属风格</h1><p>调整玻璃、字体与待机伙伴。</p></div>
+      <section class="mgroup theme-settings" aria-labelledby="themeTitle">
+        <h2 class="mgroup__title" id="themeTitle">主题风格</h2>
+        <p class="mgroup__note">调整玻璃和文字，预览后保存到灵动岛与面板。</p>
+        <div class="theme-colors">
+          <label>玻璃底色<input id="themeBackground" type="color" value="#121925"></label>
+          <label>强调色<input id="themeAccent" type="color" value="#e8c268"></label>
+          <label>文字颜色<input id="themeTextColor" type="color" value="#f2f2f2"></label>
+        </div>
+        <label class="theme-range"><span>玻璃不透明度 <output id="themeOpacityValue">80%</output></span><input id="themeOpacity" type="range" min="30" max="100" step="1" value="80"></label>
+        <label class="theme-range"><span>文字大小 <output id="themeSizeValue">100%</output></span><input id="themeSize" type="range" min="85" max="125" step="5" value="100"></label>
+        <fieldset class="theme-options"><legend>字体</legend><div>
+          <label><input type="radio" name="themeFont" value="default">默认</label><label><input type="radio" name="themeFont" value="sans">无衬线</label><label><input type="radio" name="themeFont" value="serif">衬线</label><label><input type="radio" name="themeFont" value="mono">等宽</label>
+        </div></fieldset>
+        <div class="font-library">
+          <label class="font-search-label" for="themeFontSearch">系统字体库</label>
+          <input id="themeFontSearch" type="search" autocomplete="off" placeholder="搜索本机字体" aria-controls="themeFontList">
+          <div id="themeFontList" class="font-list" role="group" aria-label="本机字体"></div>
+          <p class="mgroup__note" id="themeFontStatus">可搜索并选择本机安装的字体。</p>
+        </div>
+        <fieldset class="theme-options"><legend>字形</legend><div>
+          <label><input type="checkbox" id="themeBold">加粗</label><label><input type="checkbox" id="themeItalic">斜体</label>
+        </div></fieldset>
+        <div class="theme-actions"><button class="btn btn--gold btn--sm" id="btnSaveTheme" type="button">保存主题</button><button class="btn btn--sm" id="btnResetTheme" type="button">恢复默认</button></div>
+        <p class="mgroup__note" id="themeNote" role="status" aria-live="polite"></p>
+      </section>
+      <section class="mgroup eyes-settings">
+        <h2 class="mgroup__title">待机眼睛</h2>
+        <label class="switch"><input type="checkbox" id="swEyes" /><span class="switch__ui"></span><span class="switch__text">待机眼睛</span></label>
+        <p class="mgroup__note">与待机时间都开启时交替显示；执行任务时优先展示倒计时。</p>
+        <fieldset class="eyes-options"><legend>眼睛风格</legend><div>
+          <label><input type="radio" name="eyeStyle" value="devil"><span class="eye-sample eye-sample--devil">◈ ◈</span><span>恶魔</span></label>
+          <label><input type="radio" name="eyeStyle" value="heart"><span class="eye-sample eye-sample--heart">♥ ♥</span><span>爱心</span></label>
+          <label><input type="radio" name="eyeStyle" value="sleep"><span class="eye-sample eye-sample--sleep">⌣ ⌣</span><span>睡觉</span></label>
+          <label><input type="radio" name="eyeStyle" value="star"><span class="eye-sample eye-sample--star">✦ ✦</span><span>星星</span></label>
+          <label><input type="radio" name="eyeStyle" value="cute"><span class="eye-sample eye-sample--cute">● ●</span><span>可爱</span></label>
+          <label><input type="radio" name="eyeStyle" value="random"><span class="eye-sample">✧ ♡</span><span>随机</span></label>
+        </div></fieldset>
+        <p class="mgroup__note">睡觉时安静休息；其他眼睛会眨眼、四处看，偶尔注视鼠标。</p>
+      </section>
+    </section>
     <section class="panel__scroll panel-page preferences-page" id="preferencesPage" aria-hidden="true" inert>
       <div class="page-intro"><h1>你的灵动岛，由你设定</h1><p>调整位置、待机显示、提醒与消息展示。</p></div>
       <section class="mgroup">
@@ -183,7 +230,6 @@
         <label class="switch"><input type="checkbox" id="swHands" checked /><span class="switch__ui"></span><span class="switch__text">显示真实时钟指针</span></label>
         <label class="switch"><input type="checkbox" id="swSecond" checked /><span class="switch__ui"></span><span class="switch__text">显示秒针</span></label>
         <label class="switch"><input type="checkbox" id="swIdleClock" checked /><span class="switch__ui"></span><span class="switch__text">待机时间</span></label>
-        <label class="switch"><input type="checkbox" id="swEyes" /><span class="switch__ui"></span><span class="switch__text">待机眼睛</span></label>
         <p class="mgroup__note">时间与眼睛都开启时轮流展示，执行中的任务优先。</p>
       </section>
       <section class="mgroup">
@@ -203,6 +249,11 @@
         <p class="mgroup__note notification-settings-note">勾选消息旁的选框即可关闭，后续消息会依次补位。通知展示不影响倒计时。</p>
         <div class="notification-settings-actions"><button class="btn btn--gold btn--sm" id="btnSaveNotifications" type="button">保存设置</button><button class="btn btn--sm" id="btnTestNotification" type="button">发送测试消息</button></div>
         <p class="mgroup__note" id="notificationsConfigNote" role="status" aria-live="polite"></p>
+      </section>
+      <section class="mgroup">
+        <h2 class="mgroup__title">程序</h2>
+        <button class="btn btn--danger btn--sm" id="btnQuitApp" type="button">退出程序</button>
+        <p class="mgroup__note">退出后将结束当前计时并断开连接。</p>
       </section>
     </section>
     <section class="panel__scroll panel-page webhook-page" id="webhookPage" aria-hidden="true" inert>
@@ -226,6 +277,13 @@
         </div>
         <p class="mgroup__note">程序会通过 HTTPS 自动接收消息，无需配置本机 SSH。请保持程序运行。</p>
       </section>
+      <section class="mgroup relay-channels">
+        <h2 class="mgroup__title">独立 Webhook</h2>
+        <p class="mgroup__note">为每个消息来源创建独立地址，可单独启停。</p>
+        <div class="relay-channel-create"><input id="relayChannelName" type="text" maxlength="40" placeholder="例如：构建通知" aria-label="Webhook 名称"><button class="btn btn--gold btn--sm" id="btnCreateRelayChannel" type="button">新增</button><button class="btn btn--sm" id="btnRefreshRelayChannels" type="button">刷新</button></div>
+        <p class="mgroup__note" id="relayChannelsNote" role="status" aria-live="polite">连接服务器后可管理独立地址。</p>
+        <div id="relayChannelList" class="relay-channel-list"></div>
+      </section>
       <div class="webhook-notification-note" id="webhookNotificationNote" hidden>
         <p>通知框已关闭，消息不会展示；重新开启后接收新消息。</p><button class="phone-notification-link" id="btnWebhookNotifications" type="button">前往开启通知框 <span aria-hidden="true">→</span></button>
       </div>
@@ -248,6 +306,12 @@
         <div class="webhook-token-footer"><p class="mgroup__note">重新生成后，旧专属地址立即失效。</p><button class="webhook-text-button" id="btnRotateWebhookToken" type="button">生成令牌</button></div>
         <p class="mgroup__note">也可向 <code>/api/webhook</code> 发送请求，并使用 <code>Authorization: Bearer &lt;令牌&gt;</code> 请求头。</p>
         </details>
+      </section>
+      <section class="mgroup">
+        <h2 class="mgroup__title">本机独立 Webhook</h2>
+        <p class="mgroup__note">每个入口都有独立地址和开关；需先开启本机服务。</p>
+        <div class="relay-channel-create"><input id="localChannelName" type="text" maxlength="40" placeholder="例如：本地脚本" aria-label="本机 Webhook 名称"><button class="btn btn--gold btn--sm" id="btnCreateLocalChannel" type="button">新增</button><button class="btn btn--sm" id="btnRefreshLocalChannels" type="button">刷新</button></div>
+        <p class="mgroup__note" id="localChannelsNote" role="status"></p><div id="localChannelList" class="relay-channel-list"></div>
       </section>
       <section class="mgroup">
         <h2 class="mgroup__title">接收设置</h2>

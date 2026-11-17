@@ -88,6 +88,18 @@ impl Transport for HttpsTransport {
     }
 }
 
+/// Perform a management request off the UI thread using the same verified TLS transport.
+pub fn manage_channels(settings: &RelaySettings, operation: &serde_json::Value) -> Result<serde_json::Value, String> {
+    if !settings.enabled || settings.validate().is_err() { return Err("请先连接服务器".into()); }
+    let object = operation.as_object().ok_or("无效的操作")?;
+    let op = object.get("op").and_then(|v|v.as_str()).ok_or("无效的操作")?;
+    if !matches!(op,"list"|"create"|"update"|"delete") || operation.to_string().len()>4096 {
+        return Err("无效的操作".into());
+    }
+    let body = if op=="list" { None } else { Some(operation.to_string().into_bytes()) };
+    HttpsTransport::new().request(settings,"/api/relay/channels",body.as_deref()).map_err(|error|error.message().to_string())
+}
+
 struct Runtime {
     settings: RelaySettings,
     epoch: u64,

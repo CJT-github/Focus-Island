@@ -192,6 +192,51 @@ fn deserialize_top_offset<'de, D: serde::Deserializer<'de>>(deserializer: D) -> 
         .unwrap_or(DEFAULT_TOP_OFFSET))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeSettings {
+    pub background: String, pub accent: String, pub text_color: String,
+    pub opacity: u32, pub font: String, pub font_size: u32, pub font_style: String, pub font_weight: String,
+}
+impl Default for ThemeSettings {
+    fn default() -> Self {
+        Self { background: "#121925".into(), accent: "#e8c268".into(), text_color: "#f2f2f2".into(),
+            opacity: 80, font: "default".into(), font_size: 100, font_style: "normal".into(), font_weight: "normal".into() }
+    }
+}
+impl<'de> Deserialize<'de> for ThemeSettings {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let mut theme = Self::default();
+        let color = |key: &str, fallback: &str| -> String {
+            value.get(key).and_then(|v| v.as_str())
+                .filter(|s| s.len() == 7 && s.starts_with('#') && s.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit))
+                .unwrap_or(fallback).to_ascii_lowercase()
+        };
+        theme.background = color("background", &theme.background);
+        theme.accent = color("accent", &theme.accent);
+        theme.text_color = color("textColor", &theme.text_color);
+        theme.opacity = value.get("opacity").and_then(|v| v.as_u64()).map(|v| v.clamp(30,100) as u32).unwrap_or(theme.opacity);
+        theme.font_size = value.get("fontSize").and_then(|v| v.as_u64()).map(|v| v.clamp(85,125) as u32).unwrap_or(theme.font_size);
+        let choice = |key: &str, allowed: &[&str], fallback: &str| -> String {
+            value.get(key).and_then(|v| v.as_str()).filter(|s| allowed.contains(s)).unwrap_or(fallback).into()
+        };
+        theme.font = value.get("font").and_then(|v| v.as_str()).filter(|s| {
+            matches!(*s,"default"|"sans"|"serif"|"mono") ||
+            s.strip_prefix("local:").is_some_and(|name| !name.is_empty() && name.len() <= 160 &&
+                !name.chars().any(|c| c.is_control() || matches!(c, '<'|'>'|'\\'|'"'|'\'')))
+        }).unwrap_or("default").into();
+        theme.font_style = choice("fontStyle", &["normal","italic"], &theme.font_style);
+        theme.font_weight = choice("fontWeight", &["normal","bold"], &theme.font_weight);
+        Ok(theme)
+    }
+}
+
+fn deserialize_eye_style<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().filter(|s| matches!(*s, "devil" | "heart" | "sleep" | "star" | "cute" | "random")).unwrap_or("devil").into())
+}
+
 /// 显示与提醒偏好。IPC 使用 camelCase，旧版磁盘文件的 snake_case 仍可读。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -202,6 +247,8 @@ pub struct Settings {
     pub show_second: bool,
     #[serde(alias = "show_idle_eyes")]
     pub show_idle_eyes: bool,
+    #[serde(alias = "eye_style", deserialize_with = "deserialize_eye_style")]
+    pub eye_style: String,
     #[serde(alias = "show_idle_clock")]
     pub show_idle_clock: bool,
     pub sound: bool,
@@ -212,6 +259,7 @@ pub struct Settings {
     pub reduce_motion: bool,
     #[serde(alias = "top_offset", deserialize_with = "deserialize_top_offset")]
     pub top_offset: u32,
+    pub theme: ThemeSettings,
 }
 
 impl Default for Settings {
@@ -220,12 +268,14 @@ impl Default for Settings {
             show_hands: true,
             show_second: true,
             show_idle_eyes: false,
+            eye_style: "devil".into(),
             show_idle_clock: true,
             sound: true,
             notify: false,
             always_on_top: true,
             reduce_motion: false,
             top_offset: DEFAULT_TOP_OFFSET,
+            theme: ThemeSettings::default(),
         }
     }
 }
@@ -310,6 +360,31 @@ impl<'de> Deserialize<'de> for NotificationSettings {
         settings.normalize();
         Ok(settings)
     }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalWebhookChannel { pub id:String, pub name:String, pub token:String, pub enabled:bool }
+impl std::fmt::Debug for LocalWebhookChannel {
+    fn fmt(&self, f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {
+        f.debug_struct("LocalWebhookChannel").field("id",&self.id).field("name",&self.name)
+            .field("enabled",&self.enabled).field("token",&"<redacted>").finish()
+    }
+}
+pub fn valid_local_channel(c:&LocalWebhookChannel)->bool {
+    c.id.len()==32 && c.id.bytes().all(|b|b.is_ascii_hexdigit()) &&
+    c.token.len()==64 && c.token.bytes().all(|b|b.is_ascii_hexdigit()) &&
+    !c.name.trim().is_empty() && c.name.trim()==c.name && c.name.chars().count()<=40 &&
+    !c.name.chars().any(|c|c.is_control() || matches!(c,'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}'))
+}
+fn deserialize_local_channels<'de,D:serde::Deserializer<'de>>(d:D)->Result<Vec<LocalWebhookChannel>,D::Error>{
+    let value=serde_json::Value::deserialize(d)?;
+    let mut result=Vec::new();let mut ids=HashSet::new();let mut tokens=HashSet::new();
+    if let Some(items)=value.as_array(){for item in items.iter().take(32){
+        if let Ok(c)=serde_json::from_value::<LocalWebhookChannel>(item.clone()){
+            if valid_local_channel(&c) && ids.insert(c.id.clone()) && tokens.insert(c.token.clone()){result.push(c);}
+        }
+    }}
+    Ok(result)
 }
 
 /// Listener preferences only; credentials and payloads must never reach diagnostics.
@@ -466,6 +541,8 @@ pub struct AppState {
     pub phone: PhoneSettings,
     pub notifications: NotificationSettings,
     pub webhook: WebhookSettings,
+    #[serde(default, deserialize_with="deserialize_local_channels")]
+    pub local_webhooks: Vec<LocalWebhookChannel>,
     pub relay: RelaySettings,
 }
 
@@ -484,6 +561,7 @@ impl Default for AppState {
             phone: PhoneSettings::default(),
             notifications: NotificationSettings::default(),
             webhook: WebhookSettings::default(),
+            local_webhooks: Vec::new(),
             relay: RelaySettings::default(),
         }
     }
@@ -836,6 +914,53 @@ mod tests {
             assert!(!loaded.settings.sound);
             assert!(!loaded.settings.show_hands);
             assert!(loaded.settings.reduce_motion);
+        }
+    }
+
+    #[test]
+    fn local_font_name_roundtrips_and_rejects_unsafe_names() {
+        let safe: Settings = serde_json::from_value(serde_json::json!({"theme":{"font":"local:微软雅黑"}})).unwrap();
+        assert_eq!(safe.theme.font, "local:微软雅黑");
+        let json = serde_json::to_value(&safe).unwrap();
+        assert_eq!(serde_json::from_value::<Settings>(json).unwrap().theme.font, "local:微软雅黑");
+        for bad in ["local:", "local:bad\\nname", "local:bad\"name", "local:bad</script>", "local:bad\\\\name"] {
+            let parsed: Settings = serde_json::from_value(serde_json::json!({"theme":{"font":bad}})).unwrap();
+            assert_eq!(parsed.theme.font, "default");
+        }
+    }
+
+    #[test]
+    fn theme_settings_preserve_valid_values_and_repair_bad_fields() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "sound":false,"theme":{"background":"#AABBCC","accent":"bad","textColor":"#123456",
+                "opacity":200,"font":"serif","fontSize":90,"fontStyle":"italic","fontWeight":"bold"}
+        })).unwrap();
+        assert!(!settings.sound);
+        assert_eq!(settings.theme.background, "#aabbcc");
+        assert_eq!(settings.theme.accent, "#e8c268");
+        assert_eq!(settings.theme.opacity, 100);
+        let encoded = serde_json::to_value(&settings).unwrap();
+        assert_eq!(encoded["theme"]["font"], "serif");
+        assert_eq!(encoded["theme"]["fontStyle"], "italic");
+        assert_eq!(serde_json::from_value::<Settings>(encoded).unwrap().theme, settings.theme);
+        let malformed: Settings = serde_json::from_value(serde_json::json!({"sound":false,"theme":123})).unwrap();
+        assert!(!malformed.sound);
+        assert_eq!(malformed.theme, ThemeSettings::default());
+    }
+
+    #[test]
+    fn eye_styles_roundtrip_and_invalid_values_fall_back() {
+        for style in ["devil", "heart", "sleep", "star", "cute", "random"] {
+            let settings: Settings = serde_json::from_value(serde_json::json!({"showIdleEyes":true,"eyeStyle":style})).unwrap();
+            assert!(settings.show_idle_eyes);
+            assert_eq!(settings.eye_style, style);
+            let saved = serde_json::to_value(&settings).unwrap();
+            assert_eq!(serde_json::from_value::<Settings>(saved).unwrap().eye_style, style);
+        }
+        for invalid in [serde_json::json!("bad"),serde_json::json!(null),serde_json::json!(123)] {
+            let settings: Settings = serde_json::from_value(serde_json::json!({"showIdleEyes":true,"eyeStyle":invalid})).unwrap();
+            assert!(settings.show_idle_eyes);
+            assert_eq!(settings.eye_style, "devil");
         }
     }
 
